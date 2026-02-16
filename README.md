@@ -1,5 +1,7 @@
 # NEXUS - Collaborative World Builder
 
+https://pixelisedtree.github.io/Nexus-WorldBuilder/
+
 A powerful, real-time collaborative tool for building interconnected worlds, stories, and knowledge graphs. Create nodes, link them together, add media, and collaborate with others across the internet.
 
 ## ✨ Features
