@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NEXUS - Collaborative World Builder</title>
+    <script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.2/dist/peerjs.min.js"></script>
+    <link rel="stylesheet" href="style_01.css">
+</head>
+<body>
+    <div class="loading" id="loading">Loading...</div>
+    
+    <div class="header">
+        <div class="logo">Nexus World Builder</div>
+        <div class="header-actions">
+            <input type="text" class="nexus-name" id="nexusName" placeholder="Untitled World" />
+            <button class="btn" id="settingsBtn"><span>Settings</span></button>
+            <button class="btn btn-primary" id="shareBtn"><span>Share</span></button>
+            <button class="btn" id="saveBtn"><span>Save</span></button>
+            <button class="btn" id="loadBtn"><span>Load</span></button>
+            <button class="btn btn-danger" id="clearBtn"><span>Clear</span></button>
+        </div>
+    </div>
+    
+    <div class="main-container">
+        <div class="sidebar">
+            <div class="sidebar-section">
+                <div class="sidebar-title">Search & Filter</div>
+                <input type="text" id="searchNodes" placeholder="Search nodes..." style="width: 100%; padding: 0.6rem; background: var(--bg-tertiary); border: 1px solid var(--border); color: var(--text-primary); font-size: 0.875rem; border-radius: 3px; margin-bottom: 0.5rem;" />
+                <select id="filterType" style="width: 100%; padding: 0.6rem; background: var(--bg-tertiary); border: 1px solid var(--border); color: var(--text-primary); font-size: 0.875rem; border-radius: 3px; margin-bottom: 0.5rem;">
+                    <option value="">All Types</option>
+                </select>
+                <div id="tagFilters" style="display: flex; flex-wrap: wrap; gap: 0.25rem; margin-top: 0.5rem;"></div>
+            </div>
+            
+            <div class="sidebar-section">
+                <div class="sidebar-title">Create Nodes</div>
+                <div class="tool-grid" id="nodeTypeButtons">
+                    <button class="tool-btn" data-type="character">Character</button>
+                    <button class="tool-btn" data-type="location">Location</button>
+                    <button class="tool-btn" data-type="item">Item</button>
+                    <button class="tool-btn" data-type="event">Event</button>
+                    <button class="tool-btn" data-type="faction">Faction</button>
+                    <button class="tool-btn" data-type="concept">Concept</button>
+                </div>
+                <button class="btn" id="addNodeTypeBtn" style="width: 100%; margin-top: 0.5rem;"><span>+ Add Custom Type</span></button>
+            </div>
+            
+            <div class="sidebar-section">
+                <div class="sidebar-title">Tools</div>
+                <div class="tool-grid">
+                    <button class="tool-btn active" id="selectTool">Select</button>
+                    <button class="tool-btn" id="linkTool">Link</button>
+                </div>
+            </div>
+            
+            <div class="sidebar-section">
+                <div class="sidebar-title">View Mode</div>
+                <div class="view-modes">
+                    <button class="view-mode-btn active" data-view="graph">
+                        Graph View
+                    </button>
+                    <button class="view-mode-btn" data-view="list">
+                        List View
+                    </button>
+                </div>
+            </div>
+            
+            <div class="nodes-list" id="nodesList">
+                <div class="sidebar-title">Nodes</div>
+            </div>
+        </div>
+        
+        <div class="canvas-container" id="canvasContainer">
+            <canvas id="canvas"></canvas>
+            <div class="list-view" id="listView">
+                <div class="list-view-header">All Nodes</div>
+                <div class="list-view-grid" id="listViewGrid"></div>
+            </div>
+        </div>
+    </div>
+    
+    <div class="modal" id="nodeModal">
+        <div class="modal-content" style="max-width: 700px; max-height: 90vh; overflow-y: auto;">
+            <div class="modal-title">Create Node</div>
+            <div class="form-group">
+                <label>Name</label>
+                <input type="text" id="nodeName" placeholder="Enter node name" />
+            </div>
+            <div class="form-group">
+                <label>Type</label>
+                <select id="nodeType">
+                    <option value="character">Character</option>
+                    <option value="location">Location</option>
+                    <option value="item">Item</option>
+                    <option value="event">Event</option>
+                    <option value="faction">Faction</option>
+                    <option value="concept">Concept</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label>Description</label>
+                <textarea id="nodeDescription" placeholder="Describe this node..."></textarea>
+            </div>
+            <div class="form-group">
+                <label>Tags</label>
+                <div id="nodeTags" style="display: flex; flex-wrap: wrap; gap: 0.25rem; margin-bottom: 0.5rem;"></div>
+                <div style="display: flex; gap: 0.5rem;">
+                    <input type="text" id="newTag" placeholder="Add tag..." style="flex: 1; padding: 0.5rem; background: var(--bg-tertiary); border: 1px solid var(--border); color: var(--text-primary); font-size: 0.875rem; border-radius: 3px;" />
+                    <button class="btn" id="addTagBtn" style="padding: 0.5rem 1rem;"><span>+</span></button>
+                </div>
+            </div>
+            <div class="form-group">
+                <label>Media Attachments</label>
+                <div class="media-attachments" id="mediaAttachments"></div>
+                <div style="display: flex; gap: 0.5rem; margin-top: 0.5rem;">
+                    <button class="btn" id="addImageBtn"><span>📷 Image</span></button>
+                    <button class="btn" id="addAudioBtn"><span>🎵 Audio</span></button>
+                    <button class="btn" id="addDrawingBtn"><span>✏️ Drawing</span></button>
+                </div>
+            </div>
+            <div class="form-group">
+                <label>Custom Attributes</label>
+                <div id="customAttributes"></div>
+                <button class="btn" id="addAttributeBtn" style="width: 100%; margin-top: 0.5rem;"><span>+ Add Attribute</span></button>
+            </div>
+            <div class="form-group">
+                <label>Color</label>
+                <div class="color-picker-grid" id="colorPicker"></div>
+            </div>
+            <div class="modal-actions">
+                <button class="btn" id="cancelNodeBtn"><span>Cancel</span></button>
+                <button class="btn btn-primary" id="createNodeBtn"><span>Create</span></button>
+            </div>
+        </div>
+    </div>
+    
+    <div class="share-panel" id="sharePanel">
+        <div class="modal-title">Share Your Nexus</div>
+        <p style="color: var(--text-secondary); margin-bottom: 1rem;">
+            Share this URL with others to collaborate in real-time:
+        </p>
+        <div class="share-url" id="shareUrl"></div>
+        <button class="btn btn-primary" id="copyUrlBtn" style="width: 100%;"><span>Copy URL</span></button>
+        
+        <div class="collaborators">
+            <div class="sidebar-title">Active Collaborators</div>
+            <div id="collaboratorsList"></div>
+        </div>
+        
+        <button class="btn" id="closeShareBtn" style="width: 100%; margin-top: 1rem;"><span>Close</span></button>
+    </div>
+    
+    <div class="modal" id="settingsModal">
+        <div class="modal-content" style="max-width: 700px;">
+            <div class="modal-title">Settings</div>
+            
+            <div style="margin-bottom: 2rem;">
+                <div class="sidebar-title">Node Types</div>
+                <div id="nodeTypesList" style="margin-bottom: 1rem;"></div>
+                <button class="btn btn-primary" id="addCustomNodeType" style="width: 100%;"><span>+ Add Custom Node Type</span></button>
+            </div>
+            
+            <div style="margin-bottom: 2rem;">
+                <div class="sidebar-title">Templates</div>
+                <p style="color: var(--text-secondary); font-size: 0.875rem; margin-bottom: 1rem;">Save current node as template</p>
+                <select id="templateNodeSelect" style="width: 100%; padding: 0.6rem; background: var(--bg-tertiary); border: 1px solid var(--border); color: var(--text-primary); font-size: 0.875rem; border-radius: 3px; margin-bottom: 0.5rem;">
+                    <option value="">Select a node...</option>
+                </select>
+                <button class="btn" id="saveTemplateBtn" style="width: 100%; margin-bottom: 1rem;"><span>Save as Template</span></button>
+                <div id="templatesList"></div>
+            </div>
+            
+            <button class="btn" id="closeSettingsBtn" style="width: 100%;"><span>Close</span></button>
+        </div>
+    </div>
+    
+    <div class="modal" id="customTypeModal">
+        <div class="modal-content">
+            <div class="modal-title">Custom Node Type</div>
+            <div class="form-group">
+                <label>Type Name</label>
+                <input type="text" id="customTypeName" placeholder="e.g., Quest, Magic System, Timeline" />
+            </div>
+            <div class="form-group">
+                <label>Default Color</label>
+                <div class="color-picker-grid" id="customTypeColorPicker"></div>
+            </div>
+            <div class="form-group">
+                <label>Default Attributes (comma-separated)</label>
+                <input type="text" id="customTypeAttributes" placeholder="e.g., Level, HP, Mana" />
+            </div>
+            <div class="modal-actions">
+                <button class="btn" id="cancelCustomTypeBtn"><span>Cancel</span></button>
+                <button class="btn btn-primary" id="createCustomTypeBtn"><span>Create</span></button>
+            </div>
+        </div>
+    </div>
+    
+    <div class="context-menu" id="contextMenu">
+        <div class="context-menu-item" data-action="edit">✏️ Edit Node</div>
+        <div class="context-menu-item" data-action="link">🔗 Create Link From Here</div>
+        <div class="context-menu-item" data-action="duplicate">📋 Duplicate Node</div>
+        <div class="context-menu-separator"></div>
+        <div class="context-menu-item danger" data-action="delete">🗑️ Delete Node</div>
+    </div>
+    
+    <div class="context-menu" id="linkContextMenu">
+        <div class="context-menu-item" data-action="edit-link">✏️ Edit Link</div>
+        <div class="context-menu-item danger" data-action="delete-link">🗑️ Delete Link</div>
+    </div>
+    
+    <div class="modal" id="linkModal">
+        <div class="modal-content">
+            <div class="modal-title">Edit Connection</div>
+            <div class="form-group">
+                <label>Label (optional)</label>
+                <input type="text" id="linkLabel" placeholder="e.g., 'leads to', 'allies with', 'owns'" />
+            </div>
+            <div class="form-group">
+                <label>Description</label>
+                <textarea id="linkDescription" placeholder="Describe this connection..."></textarea>
+            </div>
+            <div class="modal-actions">
+                <button class="btn" id="cancelLinkBtn"><span>Cancel</span></button>
+                <button class="btn btn-primary" id="saveLinkBtn"><span>Save</span></button>
+            </div>
+        </div>
+    </div>
+    
+    <div class="modal" id="drawingModal">
+        <div class="modal-content" style="max-width: 600px;">
+            <div class="modal-title">Create Drawing</div>
+            <div class="drawing-canvas-container">
+                <div class="drawing-tools">
+                    <button class="drawing-tool-btn active" data-tool="pen">Pen</button>
+                    <button class="drawing-tool-btn" data-tool="eraser">Eraser</button>
+                    <input type="color" id="drawingColor" value="#212121" style="width: 40px; height: 30px; border: 1px solid var(--border); border-radius: 3px; cursor: pointer;" />
+                    <input type="range" id="drawingSize" min="1" max="20" value="3" style="width: 100px;" />
+                    <button class="btn" id="clearDrawingBtn" style="padding: 0.4rem 0.8rem; margin-left: auto;"><span>Clear</span></button>
+                </div>
+                <canvas id="drawingCanvas" class="drawing-canvas" width="500" height="400"></canvas>
+            </div>
+            <div class="modal-actions" style="margin-top: 1rem;">
+                <button class="btn" id="cancelDrawingBtn"><span>Cancel</span></button>
+                <button class="btn btn-primary" id="saveDrawingBtn"><span>Save Drawing</span></button>
+            </div>
+        </div>
+    </div>
+    
+    <div class="media-viewer" id="mediaViewer">
+        <button class="media-viewer-close" id="closeMediaViewer">×</button>
+        <div class="media-viewer-content" id="mediaViewerContent"></div>
+    </div>
+    
+    <div class="connection-status" id="connectionStatus">
+        <div id="connectionStatusText">Connecting...</div>
+        <div id="roomCodeDisplay" style="margin-top: 0.5rem; display: none;">
+            Room: <span class="room-code" id="roomCode"></span>
+        </div>
+    </div>
+    <script src="script.js">
+    </script>
+</body>
+
+</html>
+
