@@ -1,71 +1,620 @@
-// ==================== STATE MANAGEMENT ====================
-const state = {
-    nodes: [],
-    links: [],
-    selectedNode: null,
-    selectedLink: null,
-    linkingFrom: null,
-    tool: 'select',
-    viewMode: 'graph',
-    camera: { x: 0, y: 0, zoom: 1 },
-    dragging: null,
-    panning: false,
-    panStart: null,
-    collaborators: new Map(),
-    myId: Math.random().toString(36).substring(7),
-    myColor: `hsl(${Math.random() * 360}, 70%, 60%)`,
-    customNodeTypes: [],
-    templates: [],
-    filters: {
-        search: '',
-        type: '',
-        tags: []
-    },
-    contextMenuNode: null,
-    contextMenuLink: null,
-    peer: null,
-    connections: new Map(),
-    roomCode: null,
-    isHost: false
+
+'use strict';
+/* ── TYPES & PALETTE ── */
+const TYPES = [
+    { id: 'character', name: 'Character', icon: '◈', color: '#d4557a' },
+    { id: 'location', name: 'Location', icon: '◉', color: '#0098b5' },
+    { id: 'item', name: 'Item', icon: '◆', color: '#d46a28' },
+    { id: 'event', name: 'Event', icon: '◎', color: '#c82d2d' },
+    { id: 'faction', name: 'Faction', icon: '⬡', color: '#7f3bbf' },
+    { id: 'concept', name: 'Concept', icon: '◇', color: '#1a9464' },
+    { id: 'lore', name: 'Lore', icon: '◐', color: '#2870c8' },
+];
+const PALETTE = [
+    '#d4557a', '#c82d2d', '#d46a28', '#c8920a',
+    '#1a9464', '#0098b5', '#2870c8', '#7f3bbf',
+    '#e85a8a', '#20b870', '#40a8e8', '#9255d4',
+    '#d87530', '#80a820', '#50b8c8', '#c040a0',
+];
+
+/* ── STATE ── */
+const S = {
+    nodes: [], links: [], selNode: null, selLink: null,
+    connFrom: null, tool: 'select',
+    cam: { x: 0, y: 0, z: 1 }, panning: false, panStart: {},
+    dragging: null, tempMouse: null, search: '',
+    editNode: null, editTags: [], editColor: PALETTE[0],
+    ctxNRef: null, ctxLRef: null,
+    kbIdx: -1,
+    opts: { theme: 'light', scale: 'normal', grid: true, motion: false, focus: false, cc: true, tags: true }
 };
 
-const defaultNodeTypes = [
-    { id: 'character', name: 'Character', color: '#2196F3', defaultAttributes: [] },
-    { id: 'location', name: 'Location', color: '#4CAF50', defaultAttributes: [] },
-    { id: 'item', name: 'Item', color: '#FF9800', defaultAttributes: [] },
-    { id: 'event', name: 'Event', color: '#F44336', defaultAttributes: [] },
-    { id: 'faction', name: 'Faction', color: '#9C27B0', defaultAttributes: [] },
-    { id: 'concept', name: 'Concept', color: '#00BCD4', defaultAttributes: [] }
-];
+// collaboration metadata
+S.collab = {
+    peer: null,
+    roomCode: null,
+    isHost: false,
+    connections: new Map(),
+    myId: uid().toString(),
+    myColor: PALETTE[Math.floor(Math.random() * PALETTE.length)],
+    collaborators: new Map()
+};
 
-const colors = [
-    '#2196F3', '#4CAF50', '#FF9800', '#F44336', '#9C27B0',
-    '#00BCD4', '#CDDC39', '#FF5722', '#3F51B5', '#E91E63',
-    '#009688', '#FFC107'
-];
+/* ── DOM ── */
+const $ = id => document.getElementById(id);
+const canv = $('canvas'); // canvas-wrap div
 
-// ==================== PEERJS NETWORKING ====================
-let currentEditingMedia = [];
+/* ── UTILS ── */
+function gt(id) { return TYPES.find(t => t.id === id) || TYPES[0]; }
+function nc(n) { return n.color || gt(n.type).color; }
+function uid() { return Date.now() + Math.random(); }
+function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
+function say(m) { $('sr-status').textContent = ''; requestAnimationFrame(() => { $('sr-status').textContent = m; }); }
 
-function initializePeer() {
-    // Try to get room code from URL
-    const urlParams = new URLSearchParams(window.location.search);
-    const roomParam = urlParams.get('room');
-    
-    if (roomParam) {
-        // Join existing room
-        joinRoom(roomParam);
-    } else {
-        // Create new room
-        createRoom();
+function s2w(sx, sy) {
+    const r = canv.getBoundingClientRect();
+    return { x: (sx - r.left - S.cam.x) / S.cam.z, y: (sy - r.top - S.cam.y) / S.cam.z };
+}
+
+/* ── CAMERA ── */
+function applyCamera() {
+    const { x, y, z } = S.cam;
+    $('world').style.transform = `translate(${x}px,${y}px) scale(${z})`;
+    if (S.opts.grid) {
+        const g = 32 * z;
+        canv.style.backgroundSize = `${g}px ${g}px`;
+        canv.style.backgroundPosition = `${x}px ${y}px`;
+    }
+    $('zoomBadge').textContent = Math.round(z * 100) + '%';
+}
+
+/* ── NODES ── */
+function createNode(typeId, x, y, skipModal) {
+    const t = gt(typeId);
+    const n = { id: uid(), type: typeId, name: `New ${t.name}`, desc: '', color: t.color, x, y, tags: [] };
+    S.nodes.push(n);
+    mountNode(n, true);
+    refreshList();
+    updateEmpty();
+    if (!skipModal) openModal(n);
+    autoSave();
+    say(`Created ${t.name} node.`);
+    return n;
+}
+
+function mountNode(n, isNew) {
+    let el = document.getElementById('n-' + n.id);
+    if (!el) {
+        el = document.createElement('div');
+        el.id = 'n-' + n.id; el.className = 'node';
+        el.setAttribute('role', 'button'); el.setAttribute('tabindex', '-1');
+        $('world').appendChild(el);
+        if (isNew && !S.opts.motion) el.classList.add('animIn');
+        el.addEventListener('mousedown', e => nodeMD(e, n.id));
+        el.addEventListener('click', e => nodeClick(e, n.id));
+        el.addEventListener('dblclick', e => { e.stopPropagation(); openModal(S.nodes.find(x => x.id === n.id)); });
+        el.addEventListener('contextmenu', e => nodeCtx(e, n.id));
+        el.addEventListener('keydown', e => nodeKey(e, n.id));
+    }
+    const c = nc(n);
+    el.style.left = n.x + 'px'; el.style.top = n.y + 'px';
+    el.style.setProperty('--c', c);
+    el.setAttribute('aria-label', `${n.name}, ${n.type}`);
+    const cc = S.links.filter(l => l.from === n.id || l.to === n.id).length;
+    const ctHtml = (S.opts.cc && cc > 0) ? `<div class="nct">${cc} link${cc !== 1 ? 's' : ''}</div>` : '';
+    const tHtml = (S.opts.tags && n.tags.length) ? `<div class="nchips">${n.tags.slice(0, 3).map(t => `<span class="nchip">${t}</span>`).join('')}</div>` : '';
+    el.innerHTML = `<div class="nstripe"></div><div class="nrow"><span class="nbadge">${n.type}</span><span class="nicon" aria-hidden="true">${gt(n.type).icon}</span></div><div class="ntitle">${n.name}</div>${ctHtml}${tHtml}`;
+    el.classList.toggle('selected', S.selNode === n.id);
+    el.classList.toggle('csrc', S.connFrom === n.id);
+}
+
+function delNode(id) {
+    S.nodes = S.nodes.filter(n => n.id !== id);
+    S.links = S.links.filter(l => l.from !== id && l.to !== id);
+    document.getElementById('n-' + id)?.remove();
+    if (S.selNode === id) { S.selNode = null; S.kbIdx = -1; }
+    if (S.connFrom === id) cancelConn();
+    renderLinks(); refreshList(); updateEmpty(); autoSave(); say('Node deleted.');
+}
+
+function selNode(id) {
+    const p = S.selNode; S.selNode = id; S.selLink = null;
+    if (p) document.getElementById('n-' + p)?.classList.remove('selected');
+    if (id) { document.getElementById('n-' + id)?.classList.add('selected'); S.kbIdx = S.nodes.findIndex(n => n.id === id); }
+    else S.kbIdx = -1;
+    refreshList();
+}
+
+function nodeKey(e, id) {
+    if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        if (S.tool === 'connect') nodeClick(e, id);
+        else openModal(S.nodes.find(n => n.id === id));
     }
 }
 
+/* ── LINKS ── */
+function createLink(from, to) {
+    if (S.links.find(l => (l.from === from && l.to === to) || (l.from === to && l.to === from))) return;
+    S.links.push({ id: uid(), from, to, label: '' });
+    [from, to].forEach(id => { const n = S.nodes.find(x => x.id === id); if (n) mountNode(n); });
+    renderLinks(); autoSave();
+    const fn = S.nodes.find(n => n.id === from), tn = S.nodes.find(n => n.id === to);
+    say(`Connected ${fn?.name || 'node'} to ${tn?.name || 'node'}.`);
+}
+
+function renderLinks() {
+    const svg = $('svgLayer');
+    const defs = svg.querySelector('defs');
+    svg.innerHTML = '';
+    if (defs) svg.appendChild(defs);
+    if (S.connFrom && S.tempMouse) {
+        const fn = S.nodes.find(n => n.id === S.connFrom);
+        if (fn) svg.appendChild(mkL(fn.x, fn.y, S.tempMouse.x, S.tempMouse.y, 'var(--accent)', 1.5, true, null, .4));
+    }
+    for (const lk of S.links) {
+        const fn = S.nodes.find(n => n.id === lk.from), tn = S.nodes.find(n => n.id === lk.to);
+        if (!fn || !tn) continue;
+        const dx = tn.x - fn.x, dy = tn.y - fn.y, d = Math.hypot(dx, dy); if (d < 2) continue;
+        const nx = dx / d, ny = dy / d, r = 68;
+        const x1 = fn.x + nx * r, y1 = fn.y + ny * r, x2 = tn.x - nx * (r + 9), y2 = tn.y - ny * (r + 9);
+        const isSel = S.selLink === lk.id;
+        const hit = mkL(x1, y1, x2, y2, 'transparent', 15);
+        hit.setAttribute('pointer-events', 'stroke'); hit.style.cursor = 'pointer';
+        hit.addEventListener('mousedown', e => e.stopPropagation());
+        hit.addEventListener('click', e => { e.stopPropagation(); S.selLink = lk.id; S.selNode = null; renderLinks(); refreshList(); });
+        hit.addEventListener('contextmenu', e => { e.preventDefault(); e.stopPropagation(); S.ctxLRef = lk; showMenu($('ctxL'), e.clientX, e.clientY); });
+        $('svgLayer').appendChild(hit);
+        $('svgLayer').appendChild(mkL(x1, y1, x2, y2, 'var(--accent)', 1.5, false, isSel ? 'url(#arrs)' : 'url(#arr)', isSel ? 1 : .5));
+        if (lk.label) {
+            const mx = (fn.x + tn.x) / 2, my = (fn.y + tn.y) / 2;
+            const bg = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+            bg.setAttribute('x', mx - 28); bg.setAttribute('y', my - 7); bg.setAttribute('width', 56); bg.setAttribute('height', 14);
+            bg.setAttribute('rx', 3); bg.setAttribute('fill', 'var(--surface)'); $('svgLayer').appendChild(bg);
+            const txt = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+            txt.setAttribute('x', mx); txt.setAttribute('y', my); txt.setAttribute('text-anchor', 'middle');
+            txt.setAttribute('dominant-baseline', 'middle'); txt.setAttribute('fill', 'var(--text-mid)');
+            txt.setAttribute('font-size', '10'); txt.setAttribute('font-family', 'Nunito Sans,sans-serif');
+            txt.textContent = lk.label; $('svgLayer').appendChild(txt);
+        }
+    }
+}
+
+function mkL(x1, y1, x2, y2, stroke, w, dash, me, opa = 1) {
+    const l = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+    l.setAttribute('x1', x1); l.setAttribute('y1', y1); l.setAttribute('x2', x2); l.setAttribute('y2', y2);
+    l.setAttribute('stroke', stroke); l.setAttribute('stroke-width', w); l.setAttribute('opacity', opa);
+    if (dash) l.setAttribute('stroke-dasharray', '6,4');
+    if (me) l.setAttribute('marker-end', me);
+    return l;
+}
+
+/* ── CONNECT ── */
+function startConn(id) {
+    S.connFrom = id;
+    document.getElementById('n-' + id)?.classList.add('csrc');
+    $('connBanner').classList.add('on');
+    canv.classList.add('connecting');
+    say(`Connection started. Click another node to connect. Esc to cancel.`);
+}
+function cancelConn() {
+    if (S.connFrom) document.getElementById('n-' + S.connFrom)?.classList.remove('csrc');
+    S.connFrom = null; S.tempMouse = null;
+    $('connBanner').classList.remove('on');
+    canv.classList.remove('connecting');
+    renderLinks();
+}
+
+/* ── CANVAS EVENTS ── */
+function nodeMD(e, id) {
+    if (e.button !== 0 || S.tool === 'connect') return;
+    e.stopPropagation();
+    const wp = s2w(e.clientX, e.clientY), n = S.nodes.find(x => x.id === id);
+    S.dragging = { id, sx: n.x, sy: n.y, mx: wp.x, my: wp.y };
+    selNode(id); canv.classList.add('panning');
+}
+function nodeClick(e, id) {
+    e.stopPropagation();
+    if (S.tool !== 'connect') return;
+    if (!S.connFrom) { startConn(id); return; }
+    if (S.connFrom !== id) { createLink(S.connFrom, id); cancelConn(); }
+    else cancelConn();
+}
+function nodeCtx(e, id) {
+    e.preventDefault(); e.stopPropagation();
+    S.ctxNRef = S.nodes.find(n => n.id === id); selNode(id);
+    showMenu($('ctxN'), e.clientX, e.clientY);
+}
+
+canv.addEventListener('mousedown', e => {
+    if (e.button !== 0) return;
+    const ok = e.target === canv || e.target === $('world') || e.target.tagName === 'svg' || e.target.tagName === 'SVG' || e.target === $('svgLayer');
+    if (!ok) return;
+    if (S.tool === 'connect' && S.connFrom) { cancelConn(); return; }
+    S.panning = true;
+    S.panStart = { mx: e.clientX, my: e.clientY, cx: S.cam.x, cy: S.cam.y };
+    canv.classList.add('panning'); selNode(null); S.selLink = null; renderLinks();
+});
+document.addEventListener('mousemove', e => {
+    if (S.dragging) {
+        const wp = s2w(e.clientX, e.clientY), d = S.dragging, n = S.nodes.find(x => x.id === d.id);
+        n.x = d.sx + (wp.x - d.mx); n.y = d.sy + (wp.y - d.my);
+        const el = document.getElementById('n-' + n.id);
+        if (el) { el.style.left = n.x + 'px'; el.style.top = n.y + 'px'; }
+        renderLinks();
+    } else if (S.panning) {
+        S.cam.x = S.panStart.cx + (e.clientX - S.panStart.mx);
+        S.cam.y = S.panStart.cy + (e.clientY - S.panStart.my);
+        applyCamera();
+    }
+    if (S.connFrom) { S.tempMouse = s2w(e.clientX, e.clientY); renderLinks(); }
+});
+document.addEventListener('mouseup', () => {
+    if (S.dragging) autoSave();
+    S.dragging = null; S.panning = false; canv.classList.remove('panning');
+});
+canv.addEventListener('dblclick', e => {
+    const ok = e.target === canv || e.target === $('world') || e.target.tagName === 'svg' || e.target.tagName === 'SVG' || e.target === $('svgLayer');
+    if (!ok) return;
+    const wp = s2w(e.clientX, e.clientY); createNode('character', wp.x, wp.y);
+});
+canv.addEventListener('wheel', e => {
+    e.preventDefault();
+    const oz = S.cam.z; S.cam.z = clamp(oz * (e.deltaY > 0 ? .9 : 1.1), .08, 6);
+    const r = canv.getBoundingClientRect(), mx = e.clientX - r.left, my = e.clientY - r.top;
+    S.cam.x = mx - (mx - S.cam.x) * (S.cam.z / oz); S.cam.y = my - (my - S.cam.y) * (S.cam.z / oz);
+    applyCamera();
+}, { passive: false });
+canv.addEventListener('contextmenu', e => { if (e.target === canv) e.preventDefault(); });
+
+/* ── KEYBOARD ── */
+document.addEventListener('keydown', e => {
+    const inField = e.target.matches('input,textarea,select,button');
+    if (inField) return;
+    const sn = S.selNode && S.nodes.find(n => n.id === S.selNode);
+    if (e.key === 'Escape') { if (S.connFrom) cancelConn(); else { selNode(null); S.selLink = null; renderLinks(); } }
+    if (e.key === 's') setTool('select');
+    if (e.key === 'c') setTool('connect');
+    if (e.key === 'e' && sn) openModal(sn);
+    if ((e.key === 'Delete' || e.key === 'Backspace') && !e.target.matches('input,textarea')) {
+        if (S.selNode) { delNode(S.selNode); autoSave(); }
+        else if (S.selLink) { S.links = S.links.filter(l => l.id !== S.selLink); S.selLink = null; renderLinks(); autoSave(); say('Connection deleted.'); }
+    }
+    if (e.key === 'Tab' && canv === document.activeElement) {
+        e.preventDefault();
+        if (!S.nodes.length) return;
+        S.kbIdx = (S.kbIdx + (e.shiftKey ? -1 : 1) + S.nodes.length) % S.nodes.length;
+        const n = S.nodes[S.kbIdx]; selNode(n.id);
+        const r = canv.getBoundingClientRect();
+        S.cam.x = r.width / 2 - n.x * S.cam.z; S.cam.y = r.height / 2 - n.y * S.cam.z;
+        applyCamera(); say(`${n.name}, ${n.type}`);
+    }
+    if (sn && ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.key)) {
+        e.preventDefault();
+        const st = e.shiftKey ? 40 : 8;
+        if (e.key === 'ArrowUp') sn.y -= st;
+        if (e.key === 'ArrowDown') sn.y += st;
+        if (e.key === 'ArrowLeft') sn.x -= st;
+        if (e.key === 'ArrowRight') sn.x += st;
+        const el = document.getElementById('n-' + sn.id);
+        if (el) { el.style.left = sn.x + 'px'; el.style.top = sn.y + 'px'; }
+        renderLinks(); autoSave();
+    }
+    if (e.ctrlKey && (e.key === 's' || e.key === 'S')) { e.preventDefault(); exportJSON(); }
+});
+
+/* ── TOOLS ── */
+function setTool(t) {
+    S.tool = t;
+    const bs = $('toolSel'), bc = $('toolCon');
+    bs.setAttribute('aria-pressed', t === 'select' ? 'true' : 'false'); bs.classList.toggle('active', t === 'select');
+    bc.setAttribute('aria-pressed', t === 'connect' ? 'true' : 'false'); bc.classList.toggle('active', t === 'connect');
+    if (t === 'select') cancelConn();
+    canv.classList.toggle('connecting', t === 'connect');
+}
+$('toolSel').addEventListener('click', () => setTool('select'));
+$('toolCon').addEventListener('click', () => setTool('connect'));
+
+/* ── CONTEXT MENUS ── */
+let prevF = null;
+function showMenu(el, x, y) {
+    hideMenus(); prevF = document.activeElement;
+    el.style.left = x + 'px'; el.style.top = y + 'px';
+    el.classList.add('on');
+    const first = el.querySelector('.ctx-it'); if (first) first.focus();
+    const items = [...el.querySelectorAll('.ctx-it')];
+    el._kh = ev => {
+        if (ev.key === 'Escape') { hideMenus(); prevF?.focus(); }
+        if (ev.key === 'ArrowDown') { ev.preventDefault(); const i = items.indexOf(document.activeElement); items[(i + 1) % items.length]?.focus(); }
+        if (ev.key === 'ArrowUp') { ev.preventDefault(); const i = items.indexOf(document.activeElement); items[(i - 1 + items.length) % items.length]?.focus(); }
+    };
+    document.addEventListener('keydown', el._kh);
+}
+function hideMenus() {
+    document.querySelectorAll('.ctx').forEach(m => { if (m._kh) document.removeEventListener('keydown', m._kh); m.classList.remove('on'); });
+}
+document.addEventListener('click', hideMenus);
+
+$('ctxN').querySelectorAll('.ctx-it').forEach(it => {
+    it.addEventListener('click', e => {
+        e.stopPropagation(); const n = S.ctxNRef; if (!n) return;
+        switch (it.dataset.a) {
+            case 'edit': openModal(n); break;
+            case 'conn': setTool('connect'); startConn(n.id); break;
+            case 'dup': {
+                const dn = { ...n, id: uid(), x: n.x + 40, y: n.y + 40, tags: [...n.tags], name: n.name + ' (copy)' };
+                S.nodes.push(dn); mountNode(dn, true); refreshList(); autoSave(); say(`Duplicated ${n.name}`);
+                break;
+            }
+            case 'del': delNode(n.id); autoSave(); break;
+        }
+        hideMenus(); prevF?.focus();
+    });
+});
+$('ctxL').querySelectorAll('.ctx-it').forEach(it => {
+    it.addEventListener('click', e => {
+        e.stopPropagation(); const lk = S.ctxLRef; if (!lk) return;
+        if (it.dataset.a === 'del-link') {
+            S.links = S.links.filter(l => l.id !== lk.id); S.selLink = null; renderLinks();
+            [lk.from, lk.to].forEach(id => { const n = S.nodes.find(x => x.id === id); if (n) mountNode(n); });
+            autoSave(); say('Connection deleted.');
+        }
+        hideMenus(); prevF?.focus();
+    });
+});
+
+/* ── SIDEBAR ── */
+function initSidebar() {
+    const g = $('typeGrid'); g.innerHTML = '';
+    TYPES.forEach(t => {
+        const btn = document.createElement('button');
+        btn.className = 'type-btn'; btn.setAttribute('aria-label', `Create ${t.name} node`);
+        btn.innerHTML = `<span class="tpip" style="background:${t.color}" aria-hidden="true"></span>${t.name}`;
+        btn.addEventListener('click', () => {
+            const r = canv.getBoundingClientRect();
+            const wp = s2w(r.left + r.width / 2 + (Math.random() - .5) * 90, r.top + r.height / 2 + (Math.random() - .5) * 90);
+            createNode(t.id, wp.x, wp.y);
+        });
+        g.appendChild(btn);
+    });
+    const sel = $('fType'); sel.innerHTML = '';
+    TYPES.forEach(t => { const o = document.createElement('option'); o.value = t.id; o.textContent = t.name; sel.appendChild(o); });
+}
+
+function refreshList() {
+    const q = S.search.toLowerCase();
+    const vis = S.nodes.filter(n => !q || n.name.toLowerCase().includes(q) || n.type.includes(q) || n.tags.some(t => t.toLowerCase().includes(q)));
+    $('nodesList').innerHTML = ''; $('nodeCount').textContent = S.nodes.length;
+    vis.forEach(n => {
+        const div = document.createElement('div');
+        div.className = 'nli' + (S.selNode === n.id ? ' active' : '');
+        div.setAttribute('role', 'listitem'); div.setAttribute('tabindex', '0');
+        div.setAttribute('aria-label', `${n.name}, ${n.type}${S.selNode === n.id ? ', selected' : ''}`);
+        div.innerHTML = `<div class="nldot" style="background:${nc(n)}" aria-hidden="true"></div><span class="nlname">${n.name}</span><span class="nltype">${n.type}</span>`;
+        const go = () => { selNode(n.id); const r = canv.getBoundingClientRect(); S.cam.x = r.width / 2 - n.x * S.cam.z; S.cam.y = r.height / 2 - n.y * S.cam.z; applyCamera(); say(`Navigated to ${n.name}`); };
+        div.addEventListener('click', go);
+        div.addEventListener('dblclick', () => openModal(n));
+        div.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); go(); } });
+        $('nodesList').appendChild(div);
+    });
+}
+$('searchInput').addEventListener('input', e => { S.search = e.target.value; refreshList(); });
+
+/* ── MODAL ── */
+let mRF = null;
+function openModal(node) {
+    if (!node) return;
+    S.editNode = node; S.editTags = [...node.tags]; S.editColor = node.color || gt(node.type).color;
+    mRF = document.activeElement;
+    $('mTitle').textContent = node.name.startsWith('New ') ? 'Create Node' : 'Edit Node';
+    $('fName').value = node.name; $('fType').value = node.type; $('fDesc').value = node.desc || '';
+    $('fBtnDel').style.display = node.name.startsWith('New ') ? 'none' : 'flex';
+    renderTagChips(); renderSwatches();
+    $('nodeModal').classList.add('on');
+    setTimeout(() => $('fName').select(), 55);
+    $('nodeModal').addEventListener('keydown', trapModal);
+}
+function closeModal() {
+    $('nodeModal').classList.remove('on');
+    $('nodeModal').removeEventListener('keydown', trapModal);
+    S.editNode = null; mRF?.focus();
+}
+function trapModal(e) {
+    if (e.key === 'Escape') { closeModal(); return; }
+    if (e.key !== 'Tab') return;
+    const fa = [...$('nodeModal').querySelectorAll('button:not([disabled]),input,select,textarea,[tabindex="0"]')].filter(el => !el.closest('[style*="display:none"]'));
+    if (!fa.length) return;
+    const f = fa[0], l = fa[fa.length - 1];
+    if (e.shiftKey) { if (document.activeElement === f) { e.preventDefault(); l.focus(); } }
+    else { if (document.activeElement === l) { e.preventDefault(); f.focus(); } }
+}
+$('nodeModal').addEventListener('click', e => { if (e.target === $('nodeModal')) closeModal(); });
+$('mClose').addEventListener('click', closeModal); $('fBtnCancel').addEventListener('click', closeModal);
+$('fBtnSave').addEventListener('click', () => {
+    const n = S.editNode; if (!n) return;
+    const v = $('fName').value.trim();
+    if (!v) { $('fName').focus(); $('fName').setAttribute('aria-invalid', 'true'); return; }
+    $('fName').removeAttribute('aria-invalid');
+    n.name = v; n.type = $('fType').value; n.desc = $('fDesc').value; n.tags = [...S.editTags]; n.color = S.editColor;
+    mountNode(n); refreshList(); renderLinks(); closeModal(); autoSave(); say(`Saved ${n.name}.`);
+});
+$('fName').addEventListener('keydown', e => { if (e.key === 'Enter') $('fBtnSave').click(); });
+$('fBtnDel').addEventListener('click', () => {
+    if (!S.editNode) return;
+    if (!confirm(`Delete "${S.editNode.name}"?`)) return;
+    delNode(S.editNode.id); closeModal(); autoSave();
+});
+
+/* Tag chips + input */
+function renderTagChips() {
+    const box = $('fTagsBox'); box.innerHTML = '';
+    S.editTags.forEach(tag => {
+        const chip = document.createElement('span'); chip.className = 'chip';
+        const btn = document.createElement('button'); btn.className = 'chipx'; btn.type = 'button';
+        btn.setAttribute('aria-label', `Remove tag ${tag}`); btn.textContent = '×';
+        btn.addEventListener('click', () => { S.editTags = S.editTags.filter(t => t !== tag); renderTagChips(); });
+        chip.appendChild(document.createTextNode(tag)); chip.appendChild(btn); box.appendChild(chip);
+    });
+    const inp = document.createElement('input'); inp.className = 'taginline';
+    inp.placeholder = S.editTags.length ? '' : 'Add tag, Enter…'; inp.setAttribute('aria-label', 'Add tag');
+    inp.addEventListener('keydown', e => {
+        if (e.key === 'Enter') { e.preventDefault(); const v = inp.value.trim(); if (v && !S.editTags.includes(v)) { S.editTags.push(v); renderTagChips(); } else inp.value = ''; }
+        if (e.key === 'Backspace' && !inp.value && S.editTags.length) { S.editTags.pop(); renderTagChips(); }
+    });
+    box.appendChild(inp); box.addEventListener('click', () => inp.focus());
+}
+
+/* Swatches rendering */
+function renderSwatches() {
+    const box = $('fSwatches'); box.innerHTML = '';
+    const seen = new Set();
+    [...TYPES.map(t => t.color), ...PALETTE].forEach(c => {
+        if (seen.has(c)) return; seen.add(c);
+        const s = document.createElement('div'); s.className = 'swatch' + (S.editColor === c ? ' on' : '');
+        s.style.background = c; s.setAttribute('role', 'radio');
+        s.setAttribute('aria-checked', S.editColor === c ? 'true' : 'false');
+        s.setAttribute('aria-label', 'Color ' + c); s.setAttribute('tabindex', S.editColor === c ? '0' : '-1');
+        s.addEventListener('click', () => {
+            S.editColor = c;
+            box.querySelectorAll('.swatch').forEach(x => { x.classList.remove('on'); x.setAttribute('aria-checked', 'false'); x.setAttribute('tabindex', '-1'); });
+            s.classList.add('on'); s.setAttribute('aria-checked', 'true'); s.setAttribute('tabindex', '0');
+        });
+        s.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); s.click(); } });
+        box.appendChild(s);
+    });
+}
+
+/* ── OPTIONS ── */
+let oRF = null;
+function openOpts() { oRF = document.activeElement; $('optOv').classList.add('on'); $('optClose').focus(); $('optOv').addEventListener('keydown', trapOpts); }
+function closeOpts() { $('optOv').classList.remove('on'); $('optOv').removeEventListener('keydown', trapOpts); oRF?.focus(); }
+function trapOpts(e) {
+    if (e.key === 'Escape') { closeOpts(); return; }
+    if (e.key !== 'Tab') return;
+    const all = [...$('optOv').querySelectorAll('button:not([disabled]),input,[tabindex="0"]')];
+    const f = all[0], l = all[all.length - 1];
+    if (e.shiftKey) { if (document.activeElement === f) { e.preventDefault(); l.focus(); } }
+    else { if (document.activeElement === l) { e.preventDefault(); f.focus(); } }
+}
+$('btnOptions').addEventListener('click', openOpts);
+$('optClose').addEventListener('click', closeOpts);
+$('optOv').addEventListener('click', e => { if (e.target === $('optOv')) closeOpts(); });
+
+document.querySelectorAll('.tpill').forEach(btn => {
+    btn.addEventListener('click', () => {
+        document.documentElement.setAttribute('data-theme', btn.dataset.theme);
+        S.opts.theme = btn.dataset.theme;
+        document.querySelectorAll('.tpill').forEach(b => { b.classList.toggle('on', b === btn); b.setAttribute('aria-checked', b === btn ? 'true' : 'false'); });
+        applyCamera(); renderLinks(); autoSave(); say(`Theme: ${btn.textContent.trim()}`);
+    });
+});
+document.querySelectorAll('.seg-b[data-scale]').forEach(btn => {
+    btn.addEventListener('click', () => {
+        const sc = btn.dataset.scale;
+        document.documentElement.setAttribute('data-fontscale', sc === 'normal' ? '' : sc);
+        S.opts.scale = sc;
+        document.querySelectorAll('.seg-b[data-scale]').forEach(b => { b.classList.toggle('on', b === btn); b.setAttribute('aria-checked', b === btn ? 'true' : 'false'); });
+        autoSave();
+    });
+});
+$('optGrid').addEventListener('change', e => {
+    S.opts.grid = e.target.checked;
+    canv.style.backgroundImage = S.opts.grid ? 'linear-gradient(var(--grid) 1px,transparent 1px),linear-gradient(90deg,var(--grid) 1px,transparent 1px)' : 'none';
+    if (S.opts.grid) applyCamera(); autoSave(); say(`Grid ${S.opts.grid ? 'on' : 'off'}`);
+});
+$('optMotion').addEventListener('change', e => {
+    S.opts.motion = e.target.checked;
+    document.documentElement.setAttribute('data-rm', S.opts.motion ? '1' : '0');
+    autoSave(); say(`Reduced motion ${S.opts.motion ? 'on' : 'off'}`);
+});
+$('optFocus').addEventListener('change', e => {
+    S.opts.focus = e.target.checked;
+    document.documentElement.setAttribute('data-enhanced-focus', S.opts.focus ? '1' : '0');
+    autoSave();
+});
+$('optCC').addEventListener('change', e => { S.opts.cc = e.target.checked; S.nodes.forEach(n => mountNode(n)); autoSave(); say(`Link counts ${S.opts.cc ? 'shown' : 'hidden'}`); });
+$('optTags').addEventListener('change', e => { S.opts.tags = e.target.checked; S.nodes.forEach(n => mountNode(n)); autoSave(); say(`Node tags ${S.opts.tags ? 'shown' : 'hidden'}`); });
+$('oExport').addEventListener('click', exportJSON);
+$('oImport').addEventListener('click', () => $('fileInput').click());
+$('oClear').addEventListener('click', () => { closeOpts(); $('btnClear').click(); });
+
+/* ── DATA ── */
+function autoSave() {
+    try {
+        localStorage.setItem('nexus-v3', JSON.stringify({ worldName: $('worldName').value, nodes: S.nodes, links: S.links, cam: S.cam, opts: S.opts }));
+    } catch (e) { /* ignore */ }
+
+    // if we're collaborating, send the updated state to connected peers
+    if (S.collab && S.collab.connections.size > 0) {
+        broadcastStateToPeers();
+    }
+}
+function exportJSON() {
+    const name = $('worldName').value || 'nexus-world';
+    const blob = new Blob([JSON.stringify({ worldName: name, nodes: S.nodes, links: S.links }, null, 2)], { type: 'application/json' });
+    const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name.replace(/\s+/g, '-') + '.json'; a.click(); URL.revokeObjectURL(a.href);
+    say('World exported.');
+}
+function applyOpts(o) {
+    document.documentElement.setAttribute('data-theme', o.theme || 'light');
+    document.documentElement.setAttribute('data-fontscale', o.scale === 'normal' || !o.scale ? '' : o.scale);
+    document.documentElement.setAttribute('data-rm', o.motion ? '1' : '0');
+    document.documentElement.setAttribute('data-enhanced-focus', o.focus ? '1' : '0');
+    $('optGrid').checked = o.grid !== false; $('optMotion').checked = !!o.motion;
+    $('optFocus').checked = !!o.focus; $('optCC').checked = o.cc !== false; $('optTags').checked = o.tags !== false;
+    if (!o.grid) canv.style.backgroundImage = 'none';
+    document.querySelectorAll('.tpill').forEach(b => { b.classList.toggle('on', b.dataset.theme === (o.theme || 'light')); b.setAttribute('aria-checked', b.dataset.theme === (o.theme || 'light') ? 'true' : 'false'); });
+    const sc = o.scale || 'normal';
+    document.querySelectorAll('.seg-b[data-scale]').forEach(b => { b.classList.toggle('on', b.dataset.scale === sc); b.setAttribute('aria-checked', b.dataset.scale === sc ? 'true' : 'false'); });
+}
+
+function loadData(data) {
+    $('worldName').value = data.worldName || 'New World';
+    S.nodes = []; S.links = [];
+    $('world').querySelectorAll('.node').forEach(n => n.remove());
+    S.nodes = data.nodes || [];
+    S.links = (data.links || []).map(l => ({ ...l, id: l.id || uid() }));
+    if (data.cam) S.cam = { ...S.cam, ...data.cam };
+    if (data.opts) { Object.assign(S.opts, data.opts); applyOpts(S.opts); }
+    S.nodes.forEach(n => mountNode(n));
+    renderLinks(); refreshList(); applyCamera(); updateEmpty();
+}
+$('btnExport').addEventListener('click', exportJSON);
+$('btnImport').addEventListener('click', () => $('fileInput').click());
+$('fileInput').addEventListener('change', e => {
+    const f = e.target.files[0]; if (!f) return;
+    const r = new FileReader();
+    r.onload = ev => { try { loadData(JSON.parse(ev.target.result)); autoSave(); say('World imported.'); } catch { alert('Invalid file.'); } };
+    r.readAsText(f); e.target.value = '';
+});
+$('btnClear').addEventListener('click', () => {
+    if (!confirm('Clear all nodes and connections?')) return;
+    S.nodes = []; S.links = []; S.selNode = null; S.selLink = null; S.kbIdx = -1;
+    $('world').querySelectorAll('.node').forEach(n => n.remove());
+    renderLinks(); refreshList(); updateEmpty(); autoSave(); say('Canvas cleared.');
+});
+$('worldName').addEventListener('input', autoSave);
+
+/* ── MISC ── */
+function updateEmpty() { $('emptySt').classList.toggle('gone', S.nodes.length > 0); }
+
+/* respect system prefers-reduced-motion */
+if (window.matchMedia('(prefers-reduced-motion:reduce)').matches && !S.opts.motion) {
+    S.opts.motion = true; $('optMotion').checked = true;
+    document.documentElement.setAttribute('data-rm', '1');
+}
+
+/* ── COLLABORATION ── */
+function getQueryParam(name) {
+    const params = new URLSearchParams(window.location.search);
+    return params.get(name);
+}
+
 function createRoom() {
-    state.roomCode = generateRoomCode();
-    state.isHost = true;
-    
-    state.peer = new Peer('nexus-' + state.roomCode, {
+    S.collab.roomCode = generateRoomCode();
+    S.collab.isHost = true;
+
+    S.collab.peer = new Peer('nexus-' + S.collab.roomCode, {
         config: {
             iceServers: [
                 { urls: 'stun:stun.l.google.com:19302' },
@@ -73,32 +622,30 @@ function createRoom() {
             ]
         }
     });
-    
-    state.peer.on('open', (id) => {
+
+    S.collab.peer.on('open', (id) => {
         console.log('Peer initialized with ID:', id);
-        updateConnectionStatus('online', `Room created: ${state.roomCode}`);
+        updateConnectionStatus('online', `Room created: ${S.collab.roomCode}`);
         updateRoomCodeDisplay();
-        
-        // Update URL without reload
-        const newUrl = window.location.origin + window.location.pathname + '?room=' + state.roomCode;
+        const newUrl = window.location.origin + window.location.pathname + '?room=' + S.collab.roomCode;
         window.history.pushState({}, '', newUrl);
     });
-    
-    state.peer.on('connection', (conn) => {
+
+    S.collab.peer.on('connection', (conn) => {
         handleConnection(conn);
     });
-    
-    state.peer.on('error', (err) => {
+
+    S.collab.peer.on('error', (err) => {
         console.error('Peer error:', err);
         updateConnectionStatus('offline', 'Connection error');
     });
 }
 
 function joinRoom(roomCode) {
-    state.roomCode = roomCode;
-    state.isHost = false;
-    
-    state.peer = new Peer({
+    S.collab.roomCode = roomCode;
+    S.collab.isHost = false;
+
+    S.collab.peer = new Peer({
         config: {
             iceServers: [
                 { urls: 'stun:stun.l.google.com:19302' },
@@ -106,19 +653,19 @@ function joinRoom(roomCode) {
             ]
         }
     });
-    
-    state.peer.on('open', (id) => {
+
+    S.collab.peer.on('open', (id) => {
         console.log('Peer initialized, joining room:', roomCode);
-        const conn = state.peer.connect('nexus-' + roomCode, { reliable: true });
+        const conn = S.collab.peer.connect('nexus-' + roomCode, { reliable: true });
         handleConnection(conn);
         updateRoomCodeDisplay();
     });
-    
-    state.peer.on('connection', (conn) => {
+
+    S.collab.peer.on('connection', (conn) => {
         handleConnection(conn);
     });
-    
-    state.peer.on('error', (err) => {
+
+    S.collab.peer.on('error', (err) => {
         console.error('Peer error:', err);
         updateConnectionStatus('offline', 'Failed to join room');
     });
@@ -127,1976 +674,153 @@ function joinRoom(roomCode) {
 function handleConnection(conn) {
     conn.on('open', () => {
         console.log('Connected to peer:', conn.peer);
-        state.connections.set(conn.peer, conn);
-        
-        const peerCount = state.connections.size;
+        S.collab.connections.set(conn.peer, conn);
+        const peerCount = S.collab.connections.size;
         updateConnectionStatus('online', `Connected (${peerCount + 1} users)`);
-        
-        // Send current state to new peer
-        if (state.isHost) {
+        if (S.collab.isHost) {
             conn.send({
                 type: 'full_state',
                 data: {
-                    nodes: state.nodes,
-                    links: state.links,
-                    customNodeTypes: state.customNodeTypes,
-                    templates: state.templates,
-                    name: document.getElementById('nexusName').value
+                    worldName: $('worldName').value,
+                    nodes: S.nodes,
+                    links: S.links
                 }
             });
         }
     });
-    
     conn.on('data', (data) => {
         handlePeerData(data, conn);
     });
-    
     conn.on('close', () => {
-        console.log('Peer disconnected:', conn.peer);
-        state.connections.delete(conn.peer);
-        const peerCount = state.connections.size;
+        S.collab.connections.delete(conn.peer);
+        const peerCount = S.collab.connections.size;
         updateConnectionStatus('online', `Connected (${peerCount + 1} users)`);
     });
 }
 
 function handlePeerData(data, conn) {
-    if (data.type === 'full_state') {
-        // Receiving full state from host
-        state.nodes = data.data.nodes;
-        state.links = data.data.links;
-        state.customNodeTypes = data.data.customNodeTypes || [];
-        state.templates = data.data.templates || [];
-        document.getElementById('nexusName').value = data.data.name;
-        updateNodesList();
-        updateListView();
-        updateFilterOptions();
-        updateNodeTypeButtons();
-        render();
-    } else if (data.type === 'state_update') {
-        // Incremental update
-        state.nodes = data.data.nodes;
-        state.links = data.data.links;
-        state.customNodeTypes = data.data.customNodeTypes || [];
-        state.templates = data.data.templates || [];
-        document.getElementById('nexusName').value = data.data.name;
-        updateNodesList();
-        updateListView();
-        updateFilterOptions();
-        updateNodeTypeButtons();
-        render();
+    if (data.type === 'full_state' || data.type === 'state_update') {
+        const d = data.data;
+        if (d.worldName !== undefined) $('worldName').value = d.worldName;
+        S.nodes = d.nodes || [];
+        S.links = d.links || [];
+        $('world').querySelectorAll('.node').forEach(n => n.remove());
+        S.nodes.forEach(n => mountNode(n));
+        renderLinks(); refreshList(); updateEmpty();
     } else if (data.type === 'cursor') {
         updateCollaboratorCursor(data.id, data.color, data.x, data.y);
     }
 }
 
 function broadcastStateToPeers() {
-    const data = {
+    const payload = {
         type: 'state_update',
         data: {
-            nodes: state.nodes,
-            links: state.links,
-            customNodeTypes: state.customNodeTypes,
-            templates: state.templates,
-            name: document.getElementById('nexusName').value
+            worldName: $('worldName').value,
+            nodes: S.nodes,
+            links: S.links
         }
     };
-    
-    state.connections.forEach((conn) => {
-        if (conn.open) {
-            conn.send(data);
-        }
-    });
+    S.collab.connections.forEach(conn => { if (conn.open) conn.send(payload); });
 }
 
 function broadcastCursorToPeers(x, y) {
-    const data = {
-        type: 'cursor',
-        id: state.myId,
-        color: state.myColor,
-        x: x,
-        y: y
-    };
-    
-    state.connections.forEach((conn) => {
-        if (conn.open) {
-            conn.send(data);
-        }
-    });
+    const payload = { type: 'cursor', id: S.collab.myId, color: S.collab.myColor, x, y };
+    S.collab.connections.forEach(conn => { if (conn.open) conn.send(payload); });
 }
 
 function generateRoomCode() {
     const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
     let code = '';
-    for (let i = 0; i < 6; i++) {
-        code += chars.charAt(Math.floor(Math.random() * chars.length));
-    }
+    for (let i = 0; i < 6; i++) code += chars.charAt(Math.floor(Math.random() * chars.length));
     return code;
 }
 
 function updateConnectionStatus(status, message) {
-    const statusEl = document.getElementById('connectionStatusText');
-    statusEl.className = status === 'online' ? 'connection-status-online' : 'connection-status-offline';
-    statusEl.textContent = message;
+    console.log('connectionStatus', status, message);
 }
 
 function updateRoomCodeDisplay() {
-    if (state.roomCode) {
-        document.getElementById('roomCodeDisplay').style.display = 'block';
-        document.getElementById('roomCode').textContent = state.roomCode;
-    }
+    /* no UI element by default */
 }
 
-// Helper function to get link at position
-function getLinkAt(x, y) {
-    const threshold = 10; // Distance threshold in world coordinates
-    
-    for (let link of state.links) {
-        const fromNode = state.nodes.find(n => n.id === link.from);
-        const toNode = state.nodes.find(n => n.id === link.to);
-        
-        if (!fromNode || !toNode) continue;
-        
-        // Calculate distance from point to line segment
-        const A = x - fromNode.x;
-        const B = y - fromNode.y;
-        const C = toNode.x - fromNode.x;
-        const D = toNode.y - fromNode.y;
-        
-        const dot = A * C + B * D;
-        const lenSq = C * C + D * D;
-        let param = -1;
-        
-        if (lenSq !== 0) param = dot / lenSq;
-        
-        let xx, yy;
-        
-        if (param < 0) {
-            xx = fromNode.x;
-            yy = fromNode.y;
-        } else if (param > 1) {
-            xx = toNode.x;
-            yy = toNode.y;
-        } else {
-            xx = fromNode.x + param * C;
-            yy = fromNode.y + param * D;
-        }
-        
-        const dx = x - xx;
-        const dy = y - yy;
-        const distance = Math.sqrt(dx * dx + dy * dy);
-        
-        if (distance < threshold) {
-            return link;
-        }
-    }
-    
-    return null;
-}
-
-// ==================== CANVAS SETUP ====================
-const canvas = document.getElementById('canvas');
-const ctx = canvas.getContext('2d');
-
-function resizeCanvas() {
-    canvas.width = canvas.offsetWidth;
-    canvas.height = canvas.offsetHeight;
-    render();
-}
-
-window.addEventListener('resize', resizeCanvas);
-resizeCanvas();
-
-// ==================== RENDERING ====================
-function render() {
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    
-    ctx.save();
-    ctx.translate(state.camera.x, state.camera.y);
-    ctx.scale(state.camera.zoom, state.camera.zoom);
-    
-    const filteredNodes = getFilteredNodes();
-    const filteredNodeIds = new Set(filteredNodes.map(n => n.id));
-    
-    // Draw links (only for visible nodes)
-    state.links.forEach(link => {
-        const fromNode = state.nodes.find(n => n.id === link.from);
-        const toNode = state.nodes.find(n => n.id === link.to);
-        
-        if (fromNode && toNode && filteredNodeIds.has(fromNode.id) && filteredNodeIds.has(toNode.id)) {
-            // Check if this link is selected
-            const isSelected = state.selectedLink && state.selectedLink.id === link.id;
-            
-            ctx.beginPath();
-            ctx.moveTo(fromNode.x, fromNode.y);
-            ctx.lineTo(toNode.x, toNode.y);
-            ctx.strokeStyle = isSelected ? '#F44336' : '#2196F3';
-            ctx.lineWidth = isSelected ? 3 : 2;
-            ctx.stroke();
-            
-            // Arrow
-            const angle = Math.atan2(toNode.y - fromNode.y, toNode.x - fromNode.x);
-            const arrowSize = 8;
-            ctx.save();
-            ctx.translate(toNode.x, toNode.y);
-            ctx.rotate(angle);
-            ctx.beginPath();
-            ctx.moveTo(-arrowSize - 40, -arrowSize);
-            ctx.lineTo(-40, 0);
-            ctx.lineTo(-arrowSize - 40, arrowSize);
-            ctx.strokeStyle = isSelected ? '#F44336' : '#2196F3';
-            ctx.lineWidth = isSelected ? 3 : 2;
-            ctx.stroke();
-            ctx.restore();
-            
-            // Draw label if exists
-            if (link.label) {
-                const midX = (fromNode.x + toNode.x) / 2;
-                const midY = (fromNode.y + toNode.y) / 2;
-                
-                // Background
-                ctx.font = '11px Arial';
-                const metrics = ctx.measureText(link.label);
-                const padding = 4;
-                
-                ctx.fillStyle = 'white';
-                ctx.fillRect(
-                    midX - metrics.width / 2 - padding,
-                    midY - 8 - padding,
-                    metrics.width + padding * 2,
-                    16 + padding * 2
-                );
-                
-                // Border
-                ctx.strokeStyle = '#e0e0e0';
-                ctx.lineWidth = 1;
-                ctx.strokeRect(
-                    midX - metrics.width / 2 - padding,
-                    midY - 8 - padding,
-                    metrics.width + padding * 2,
-                    16 + padding * 2
-                );
-                
-                // Text
-                ctx.fillStyle = '#212121';
-                ctx.textAlign = 'center';
-                ctx.textBaseline = 'middle';
-                ctx.fillText(link.label, midX, midY);
-            }
-        }
-    });
-    
-    // Draw temp link
-    if (state.linkingFrom) {
-        const fromNode = state.nodes.find(n => n.id === state.linkingFrom);
-        if (fromNode && state.mouseWorld) {
-            ctx.beginPath();
-            ctx.moveTo(fromNode.x, fromNode.y);
-            ctx.lineTo(state.mouseWorld.x, state.mouseWorld.y);
-            ctx.strokeStyle = '#757575';
-            ctx.lineWidth = 2;
-            ctx.setLineDash([5, 5]);
-            ctx.stroke();
-            ctx.setLineDash([]);
-        }
-    }
-    
-    // Draw nodes (only filtered ones)
-    filteredNodes.forEach(node => {
-        const radius = 40;
-        
-        // Node circle
-        ctx.beginPath();
-        ctx.arc(node.x, node.y, radius, 0, Math.PI * 2);
-        ctx.fillStyle = node.color;
-        ctx.fill();
-        
-        // Border
-        ctx.strokeStyle = state.selectedNode === node.id ? '#212121' : '#ffffff';
-        ctx.lineWidth = state.selectedNode === node.id ? 3 : 2;
-        ctx.stroke();
-        
-        // Icon (simpler text version)
-        ctx.fillStyle = '#ffffff';
-        ctx.font = 'bold 14px Arial';
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.fillText(node.type.charAt(0).toUpperCase(), node.x, node.y);
-        
-        // Media indicator
-        if (node.media && node.media.length > 0) {
-            ctx.beginPath();
-            ctx.arc(node.x + 25, node.y - 25, 8, 0, Math.PI * 2);
-            ctx.fillStyle = '#FF9800';
-            ctx.fill();
-            ctx.strokeStyle = '#ffffff';
-            ctx.lineWidth = 2;
-            ctx.stroke();
-            
-            ctx.fillStyle = '#ffffff';
-            ctx.font = 'bold 10px Arial';
-            ctx.fillText(node.media.length, node.x + 25, node.y - 25);
-        }
-        
-        // Name
-        ctx.fillStyle = '#212121';
-        ctx.font = '600 12px Arial';
-        ctx.textAlign = 'center';
-        ctx.fillText(node.name, node.x, node.y + radius + 18);
-    });
-    
-    ctx.restore();
-}
-
-// ==================== MOUSE INTERACTION ====================
-let mouse = { x: 0, y: 0 };
-
-canvas.addEventListener('mousedown', (e) => {
-    const rect = canvas.getBoundingClientRect();
-    mouse.x = e.clientX - rect.left;
-    mouse.y = e.clientY - rect.top;
-    
-    const worldPos = screenToWorld(mouse.x, mouse.y);
-    const clickedNode = getNodeAt(worldPos.x, worldPos.y);
-    const clickedLink = getLinkAt(worldPos.x, worldPos.y);
-    
-    if (state.tool === 'select') {
-        if (clickedNode) {
-            if (e.shiftKey) {
-                // Edit node
-                editNode(clickedNode);
-            } else {
-                state.dragging = clickedNode.id;
-                state.selectedNode = clickedNode.id;
-                state.selectedLink = null;
-                canvas.style.cursor = 'grabbing';
-            }
-        } else if (clickedLink) {
-            // Select link
-            state.selectedLink = clickedLink;
-            state.selectedNode = null;
-            // Double-click to edit
-            if (e.detail === 2) {
-                editLink(clickedLink);
-            }
-        } else {
-            state.panning = true;
-            state.panStart = { x: e.clientX - state.camera.x, y: e.clientY - state.camera.y };
-            state.selectedNode = null;
-            state.selectedLink = null;
-            canvas.style.cursor = 'grabbing';
-        }
-    } else if (state.tool === 'link') {
-        if (clickedNode) {
-            if (state.linkingFrom) {
-                // Complete link
-                if (state.linkingFrom !== clickedNode.id) {
-                    const newLink = createLink(state.linkingFrom, clickedNode.id);
-                    // Ask if they want to add a label
-                    setTimeout(() => {
-                        if (confirm('Add a label to this connection?')) {
-                            editLink(newLink);
-                        }
-                    }, 100);
-                }
-                state.linkingFrom = null;
-            } else {
-                // Start link
-                state.linkingFrom = clickedNode.id;
-            }
-        }
-    }
-    
-    render();
-    broadcastState();
-});
-
-canvas.addEventListener('mousemove', (e) => {
-    const rect = canvas.getBoundingClientRect();
-    mouse.x = e.clientX - rect.left;
-    mouse.y = e.clientY - rect.top;
-    
-    const worldPos = screenToWorld(mouse.x, mouse.y);
-    state.mouseWorld = worldPos;
-    
-    if (state.dragging) {
-        const node = state.nodes.find(n => n.id === state.dragging);
-        if (node) {
-            node.x = worldPos.x;
-            node.y = worldPos.y;
-            render();
-        }
-    } else if (state.panning) {
-        state.camera.x = e.clientX - state.panStart.x;
-        state.camera.y = e.clientY - state.panStart.y;
-        render();
-    } else {
-        // Cursor hover effect
-        const hoveredNode = getNodeAt(worldPos.x, worldPos.y);
-        canvas.style.cursor = hoveredNode ? 'pointer' : 'grab';
-    }
-    
-    // Broadcast cursor position
-    broadcastCursor(e.clientX, e.clientY);
-    
-    if (state.linkingFrom) {
-        render();
-    }
-});
-
-canvas.addEventListener('mouseup', () => {
-    state.dragging = null;
-    state.panning = false;
-    canvas.style.cursor = 'grab';
-    if (state.dragging) {
-        broadcastState();
-    }
-});
-
-// Right-click context menu
-canvas.addEventListener('contextmenu', (e) => {
-    e.preventDefault();
-    
-    const rect = canvas.getBoundingClientRect();
-    const mouseX = e.clientX - rect.left;
-    const mouseY = e.clientY - rect.top;
-    const worldPos = screenToWorld(mouseX, mouseY);
-    
-    // Hide all context menus first
-    document.getElementById('contextMenu').classList.remove('active');
-    document.getElementById('linkContextMenu').classList.remove('active');
-    
-    // Check if clicked on a node
-    const clickedNode = getNodeAt(worldPos.x, worldPos.y);
-    if (clickedNode) {
-        state.contextMenuNode = clickedNode;
-        const menu = document.getElementById('contextMenu');
-        menu.style.left = e.clientX + 'px';
-        menu.style.top = e.clientY + 'px';
-        menu.classList.add('active');
-        return;
-    }
-    
-    // Check if clicked on a link
-    const clickedLink = getLinkAt(worldPos.x, worldPos.y);
-    if (clickedLink) {
-        state.contextMenuLink = clickedLink;
-        const menu = document.getElementById('linkContextMenu');
-        menu.style.left = e.clientX + 'px';
-        menu.style.top = e.clientY + 'px';
-        menu.classList.add('active');
-        return;
-    }
-});
-
-// Close context menus on click outside
-document.addEventListener('click', (e) => {
-    if (!e.target.closest('.context-menu')) {
-        document.getElementById('contextMenu').classList.remove('active');
-        document.getElementById('linkContextMenu').classList.remove('active');
-    }
-});
-
-// Handle context menu actions for nodes
-document.querySelectorAll('#contextMenu .context-menu-item').forEach(item => {
-    item.addEventListener('click', () => {
-        const action = item.dataset.action;
-        const node = state.contextMenuNode;
-        
-        if (!node) return;
-        
-        switch(action) {
-            case 'edit':
-                editNode(node);
-                break;
-            case 'link':
-                state.tool = 'link';
-                state.linkingFrom = node.id;
-                document.querySelectorAll('.tool-btn').forEach(b => b.classList.remove('active'));
-                document.getElementById('linkTool').classList.add('active');
-                render();
-                break;
-            case 'duplicate':
-                const worldCenter = screenToWorld(canvas.width / 2 + 50, canvas.height / 2 + 50);
-                const duplicate = {
-                    id: Date.now() + Math.random(),
-                    type: node.type,
-                    name: node.name + ' (Copy)',
-                    description: node.description,
-                    color: node.color,
-                    tags: [...(node.tags || [])],
-                    attributes: {...(node.attributes || {})},
-                    x: worldCenter.x,
-                    y: worldCenter.y
-                };
-                state.nodes.push(duplicate);
-                updateNodesList();
-                updateListView();
-                updateFilterOptions();
-                render();
-                broadcastState();
-                break;
-            case 'delete':
-                if (confirm(`Delete "${node.name}"?`)) {
-                    deleteNode(node.id);
-                }
-                break;
-        }
-        
-        document.getElementById('contextMenu').classList.remove('active');
-    });
-});
-
-// Handle context menu actions for links
-document.querySelectorAll('#linkContextMenu .context-menu-item').forEach(item => {
-    item.addEventListener('click', () => {
-        const action = item.dataset.action;
-        const link = state.contextMenuLink;
-        
-        if (!link) return;
-        
-        switch(action) {
-            case 'edit-link':
-                editLink(link);
-                break;
-            case 'delete-link':
-                const fromNode = state.nodes.find(n => n.id === link.from);
-                const toNode = state.nodes.find(n => n.id === link.to);
-                const confirmMsg = fromNode && toNode 
-                    ? `Delete connection from "${fromNode.name}" to "${toNode.name}"?`
-                    : 'Delete this connection?';
-                if (confirm(confirmMsg)) {
-                    deleteLink(link);
-                }
-                break;
-        }
-        
-        document.getElementById('linkContextMenu').classList.remove('active');
-    });
-});
-
-canvas.addEventListener('wheel', (e) => {
-    e.preventDefault();
-    const rect = canvas.getBoundingClientRect();
-    const mouseX = e.clientX - rect.left;
-    const mouseY = e.clientY - rect.top;
-    
-    const worldBefore = screenToWorld(mouseX, mouseY);
-    
-    const zoomFactor = e.deltaY > 0 ? 0.9 : 1.1;
-    state.camera.zoom = Math.max(0.1, Math.min(3, state.camera.zoom * zoomFactor));
-    
-    const worldAfter = screenToWorld(mouseX, mouseY);
-    
-    state.camera.x += (worldAfter.x - worldBefore.x) * state.camera.zoom;
-    state.camera.y += (worldAfter.y - worldBefore.y) * state.camera.zoom;
-    
-    render();
-});
-
-function screenToWorld(screenX, screenY) {
-    return {
-        x: (screenX - state.camera.x) / state.camera.zoom,
-        y: (screenY - state.camera.y) / state.camera.zoom
-    };
-}
-
-function getNodeAt(x, y) {
-    return state.nodes.find(node => {
-        const dx = node.x - x;
-        const dy = node.y - y;
-        return Math.sqrt(dx * dx + dy * dy) < 40;
-    });
-}
-
-// ==================== NODE MANAGEMENT ====================
-function createNode(type, x, y) {
-    const nodeType = getAllNodeTypes().find(t => t.id === type);
-    const node = {
-        id: Date.now() + Math.random(),
-        type: type,
-        name: 'New ' + (nodeType ? nodeType.name : type),
-        description: '',
-        color: nodeType ? nodeType.color : colors[Math.floor(Math.random() * colors.length)],
-        x: x || canvas.width / 2,
-        y: y || canvas.height / 2,
-        tags: [],
-        attributes: {},
-        media: []  // Array of {type: 'image'|'audio'|'drawing', data: base64}
-    };
-    
-    // Add default attributes from node type
-    if (nodeType && nodeType.defaultAttributes) {
-        nodeType.defaultAttributes.forEach(attr => {
-            node.attributes[attr] = '';
-        });
-    }
-    
-    state.nodes.push(node);
-    updateNodesList();
-    updateFilterOptions();
-    render();
-    broadcastState();
-    return node;
-}
-
-function getAllNodeTypes() {
-    return [...defaultNodeTypes, ...state.customNodeTypes];
-}
-
-function getNodeTypeById(id) {
-    return getAllNodeTypes().find(t => t.id === id);
-}
-
-function editNode(node) {
-    const modal = document.getElementById('nodeModal');
-    const title = modal.querySelector('.modal-title');
-    title.textContent = 'Edit Node';
-    
-    document.getElementById('nodeName').value = node.name;
-    document.getElementById('nodeType').value = node.type;
-    document.getElementById('nodeDescription').value = node.description || '';
-    
-    // Set selected color
-    document.querySelectorAll('#colorPicker .color-option').forEach(opt => {
-        opt.classList.toggle('selected', opt.style.backgroundColor === node.color);
-    });
-    
-    // Render tags
-    renderNodeTags(node.tags || []);
-    
-    // Render custom attributes
-    renderCustomAttributes(node.attributes || {});
-    
-    // Render media
-    currentEditingMedia = [...(node.media || [])];
-    renderMediaAttachments();
-    
-    modal.classList.add('active');
-    
-    const createBtn = document.getElementById('createNodeBtn');
-    createBtn.textContent = 'Save';
-    
-    const handler = () => {
-        node.name = document.getElementById('nodeName').value || node.name;
-        node.type = document.getElementById('nodeType').value;
-        node.description = document.getElementById('nodeDescription').value;
-        
-        const selectedColor = document.querySelector('#colorPicker .color-option.selected');
-        if (selectedColor) {
-            node.color = selectedColor.style.backgroundColor;
-        }
-        
-        // Save tags
-        node.tags = currentEditingTags;
-        
-        // Save attributes
-        node.attributes = {};
-        document.querySelectorAll('#customAttributes .attribute-row').forEach(row => {
-            const keyInput = row.querySelector('.attr-key');
-            const valueInput = row.querySelector('.attr-value');
-            if (keyInput && valueInput && keyInput.value) {
-                node.attributes[keyInput.value] = valueInput.value;
-            }
-        });
-        
-        // Save media
-        node.media = currentEditingMedia;
-        
-        modal.classList.remove('active');
-        updateNodesList();
-        updateListView();
-        updateFilterOptions();
-        render();
-        broadcastState();
-        
-        createBtn.removeEventListener('click', handler);
-        createBtn.textContent = 'Create';
-    };
-    
-    createBtn.addEventListener('click', handler);
-}
-
-function renderMediaAttachments() {
-    const container = document.getElementById('mediaAttachments');
-    container.innerHTML = '';
-    
-    currentEditingMedia.forEach((media, index) => {
-        const item = document.createElement('div');
-        item.className = 'media-item';
-        
-        if (media.type === 'image') {
-            const img = document.createElement('img');
-            img.src = media.data;
-            img.alt = 'Attachment';
-            item.appendChild(img);
-        } else if (media.type === 'audio') {
-            item.className = 'media-item media-item-audio';
-            item.textContent = '🎵';
-        } else if (media.type === 'drawing') {
-            const canvas = document.createElement('canvas');
-            canvas.width = 500;
-            canvas.height = 400;
-            const ctx = canvas.getContext('2d');
-            const img = new Image();
-            img.onload = () => {
-                ctx.drawImage(img, 0, 0);
-            };
-            img.src = media.data;
-            
-            item.className = 'media-item media-item-drawing';
-            item.appendChild(canvas);
-        }
-        
-        const removeBtn = document.createElement('button');
-        removeBtn.className = 'media-item-remove';
-        removeBtn.textContent = '×';
-        removeBtn.addEventListener('click', (e) => {
-            e.stopPropagation();
-            currentEditingMedia.splice(index, 1);
-            renderMediaAttachments();
-        });
-        item.appendChild(removeBtn);
-        
-        // Click to view full size
-        item.addEventListener('click', () => {
-            viewMedia(media);
-        });
-        
-        container.appendChild(item);
-    });
-}
-
-function viewMedia(media) {
-    const viewer = document.getElementById('mediaViewer');
-    const content = document.getElementById('mediaViewerContent');
-    content.innerHTML = '';
-    
-    if (media.type === 'image' || media.type === 'drawing') {
-        const img = document.createElement('img');
-        img.src = media.data;
-        content.appendChild(img);
-    } else if (media.type === 'audio') {
-        const audio = document.createElement('audio');
-        audio.src = media.data;
-        audio.controls = true;
-        audio.style.maxWidth = '90%';
-        content.appendChild(audio);
-    }
-    
-    viewer.classList.add('active');
-}
-
-let currentEditingTags = [];
-
-function renderNodeTags(tags) {
-    currentEditingTags = [...tags];
-    const container = document.getElementById('nodeTags');
-    container.innerHTML = '';
-    
-    currentEditingTags.forEach(tag => {
-        const tagEl = document.createElement('span');
-        tagEl.className = 'tag tag-removable';
-        tagEl.innerHTML = `${tag} <span class="tag-remove">×</span>`;
-        tagEl.querySelector('.tag-remove').addEventListener('click', () => {
-            currentEditingTags = currentEditingTags.filter(t => t !== tag);
-            renderNodeTags(currentEditingTags);
-        });
-        container.appendChild(tagEl);
-    });
-}
-
-function renderCustomAttributes(attributes) {
-    const container = document.getElementById('customAttributes');
-    container.innerHTML = '';
-    
-    Object.entries(attributes).forEach(([key, value]) => {
-        addAttributeRow(key, value);
-    });
-}
-
-function addAttributeRow(key = '', value = '') {
-    const container = document.getElementById('customAttributes');
-    const row = document.createElement('div');
-    row.className = 'attribute-row';
-    row.innerHTML = `
-        <input type="text" class="attr-key" placeholder="Key" value="${key}" />
-        <input type="text" class="attr-value" placeholder="Value" value="${value}" />
-        <span class="attribute-remove">×</span>
-    `;
-    row.querySelector('.attribute-remove').addEventListener('click', () => {
-        row.remove();
-    });
-    container.appendChild(row);
-}
-
-function createLink(fromId, toId, label = '', description = '') {
-    const existing = state.links.find(l => 
-        (l.from === fromId && l.to === toId) || (l.from === toId && l.to === fromId)
-    );
-    
-    if (!existing) {
-        state.links.push({ 
-            id: Date.now() + Math.random(),
-            from: fromId, 
-            to: toId,
-            label: label,
-            description: description
-        });
-        render();
-        broadcastState();
-        return state.links[state.links.length - 1];
-    }
-    return existing;
-}
-
-function editLink(link) {
-    const modal = document.getElementById('linkModal');
-    document.getElementById('linkLabel').value = link.label || '';
-    document.getElementById('linkDescription').value = link.description || '';
-    
-    modal.classList.add('active');
-    
-    const saveHandler = () => {
-        link.label = document.getElementById('linkLabel').value;
-        link.description = document.getElementById('linkDescription').value;
-        modal.classList.remove('active');
-        render();
-        broadcastState();
-        document.getElementById('saveLinkBtn').removeEventListener('click', saveHandler);
-    };
-    
-    document.getElementById('saveLinkBtn').addEventListener('click', saveHandler);
-}
-
-function deleteLink(link) {
-    state.links = state.links.filter(l => l.id !== link.id);
-    render();
-    broadcastState();
-}
-
-function deleteNode(nodeId) {
-    state.nodes = state.nodes.filter(n => n.id !== nodeId);
-    state.links = state.links.filter(l => l.from !== nodeId && l.to !== nodeId);
-    if (state.selectedNode === nodeId) {
-        state.selectedNode = null;
-    }
-    updateNodesList();
-    updateListView();
-    updateFilterOptions();
-    render();
-    broadcastState();
-}
-
-// ==================== FILTERING ====================
-function getFilteredNodes() {
-    return state.nodes.filter(node => {
-        // Search filter
-        if (state.filters.search) {
-            const searchLower = state.filters.search.toLowerCase();
-            const matchName = node.name.toLowerCase().includes(searchLower);
-            const matchDesc = (node.description || '').toLowerCase().includes(searchLower);
-            const matchType = node.type.toLowerCase().includes(searchLower);
-            const matchTags = (node.tags || []).some(tag => tag.toLowerCase().includes(searchLower));
-            const matchAttrs = Object.entries(node.attributes || {}).some(([k, v]) => 
-                k.toLowerCase().includes(searchLower) || v.toLowerCase().includes(searchLower)
-            );
-            
-            if (!matchName && !matchDesc && !matchType && !matchTags && !matchAttrs) {
-                return false;
-            }
-        }
-        
-        // Type filter
-        if (state.filters.type && node.type !== state.filters.type) {
-            return false;
-        }
-        
-        // Tag filters
-        if (state.filters.tags.length > 0) {
-            const nodeTags = node.tags || [];
-            const hasAllTags = state.filters.tags.every(tag => nodeTags.includes(tag));
-            if (!hasAllTags) {
-                return false;
-            }
-        }
-        
-        return true;
-    });
-}
-
-function updateFilterOptions() {
-    // Update type filter dropdown
-    const typeFilter = document.getElementById('filterType');
-    const currentValue = typeFilter.value;
-    typeFilter.innerHTML = '<option value="">All Types</option>';
-    
-    getAllNodeTypes().forEach(type => {
-        const option = document.createElement('option');
-        option.value = type.id;
-        option.textContent = type.name;
-        typeFilter.appendChild(option);
-    });
-    typeFilter.value = currentValue;
-    
-    // Update tag filters
-    const allTags = new Set();
-    state.nodes.forEach(node => {
-        (node.tags || []).forEach(tag => allTags.add(tag));
-    });
-    
-    const tagFilters = document.getElementById('tagFilters');
-    tagFilters.innerHTML = '';
-    
-    allTags.forEach(tag => {
-        const tagEl = document.createElement('span');
-        tagEl.className = 'tag tag-filter';
-        if (state.filters.tags.includes(tag)) {
-            tagEl.classList.add('active');
-        }
-        tagEl.textContent = tag;
-        tagEl.addEventListener('click', () => {
-            if (state.filters.tags.includes(tag)) {
-                state.filters.tags = state.filters.tags.filter(t => t !== tag);
-            } else {
-                state.filters.tags.push(tag);
-            }
-            updateFilterOptions();
-            updateNodesList();
-            updateListView();
-            render();
-        });
-        tagFilters.appendChild(tagEl);
-    });
-}
-
-// ==================== UI INTERACTIONS ====================
-
-// Search and filters
-document.getElementById('searchNodes').addEventListener('input', (e) => {
-    state.filters.search = e.target.value;
-    updateNodesList();
-    updateListView();
-    render();
-});
-
-document.getElementById('filterType').addEventListener('change', (e) => {
-    state.filters.type = e.target.value;
-    updateNodesList();
-    updateListView();
-    render();
-});
-
-// Add tag in node modal
-document.getElementById('addTagBtn').addEventListener('click', () => {
-    const input = document.getElementById('newTag');
-    const tag = input.value.trim();
-    if (tag && !currentEditingTags.includes(tag)) {
-        currentEditingTags.push(tag);
-        renderNodeTags(currentEditingTags);
-        input.value = '';
-    }
-});
-
-document.getElementById('newTag').addEventListener('keypress', (e) => {
-    if (e.key === 'Enter') {
-        document.getElementById('addTagBtn').click();
-    }
-});
-
-// Add attribute in node modal
-document.getElementById('addAttributeBtn').addEventListener('click', () => {
-    addAttributeRow();
-});
-
-// Media upload handlers
-document.getElementById('addImageBtn').addEventListener('click', () => {
-    const input = document.createElement('input');
-    input.type = 'file';
-    input.accept = 'image/*';
-    input.addEventListener('change', (e) => {
-        const file = e.target.files[0];
-        if (file) {
-            const reader = new FileReader();
-            reader.onload = (event) => {
-                currentEditingMedia.push({
-                    type: 'image',
-                    data: event.target.result
-                });
-                renderMediaAttachments();
-            };
-            reader.readAsDataURL(file);
-        }
-    });
-    input.click();
-});
-
-document.getElementById('addAudioBtn').addEventListener('click', () => {
-    const input = document.createElement('input');
-    input.type = 'file';
-    input.accept = 'audio/*';
-    input.addEventListener('change', (e) => {
-        const file = e.target.files[0];
-        if (file) {
-            const reader = new FileReader();
-            reader.onload = (event) => {
-                currentEditingMedia.push({
-                    type: 'audio',
-                    data: event.target.result
-                });
-                renderMediaAttachments();
-            };
-            reader.readAsDataURL(file);
-        }
-    });
-    input.click();
-});
-
-document.getElementById('addDrawingBtn').addEventListener('click', () => {
-    openDrawingCanvas();
-});
-
-// Media viewer close
-document.getElementById('closeMediaViewer').addEventListener('click', () => {
-    document.getElementById('mediaViewer').classList.remove('active');
-});
-
-// Drawing canvas
-let drawingCtx = null;
-let isDrawing = false;
-let drawingTool = 'pen';
-let drawingColor = '#212121';
-let drawingSize = 3;
-
-function openDrawingCanvas() {
-    const modal = document.getElementById('drawingModal');
-    const canvas = document.getElementById('drawingCanvas');
-    drawingCtx = canvas.getContext('2d');
-    
-    // Clear canvas
-    drawingCtx.fillStyle = 'white';
-    drawingCtx.fillRect(0, 0, canvas.width, canvas.height);
-    
-    modal.classList.add('active');
-}
-
-document.querySelectorAll('.drawing-tool-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
-        document.querySelectorAll('.drawing-tool-btn').forEach(b => b.classList.remove('active'));
-        btn.classList.add('active');
-        drawingTool = btn.dataset.tool;
-    });
-});
-
-document.getElementById('drawingColor').addEventListener('change', (e) => {
-    drawingColor = e.target.value;
-});
-
-document.getElementById('drawingSize').addEventListener('input', (e) => {
-    drawingSize = parseInt(e.target.value);
-});
-
-document.getElementById('clearDrawingBtn').addEventListener('click', () => {
-    const canvas = document.getElementById('drawingCanvas');
-    drawingCtx.fillStyle = 'white';
-    drawingCtx.fillRect(0, 0, canvas.width, canvas.height);
-});
-
-const drawingCanvas = document.getElementById('drawingCanvas');
-
-drawingCanvas.addEventListener('mousedown', (e) => {
-    isDrawing = true;
-    const rect = drawingCanvas.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const y = e.clientY - rect.top;
-    
-    drawingCtx.beginPath();
-    drawingCtx.moveTo(x, y);
-});
-
-drawingCanvas.addEventListener('mousemove', (e) => {
-    if (!isDrawing) return;
-    
-    const rect = drawingCanvas.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const y = e.clientY - rect.top;
-    
-    if (drawingTool === 'pen') {
-        drawingCtx.strokeStyle = drawingColor;
-        drawingCtx.lineWidth = drawingSize;
-    } else if (drawingTool === 'eraser') {
-        drawingCtx.strokeStyle = 'white';
-        drawingCtx.lineWidth = drawingSize * 3;
-    }
-    
-    drawingCtx.lineCap = 'round';
-    drawingCtx.lineJoin = 'round';
-    drawingCtx.lineTo(x, y);
-    drawingCtx.stroke();
-});
-
-drawingCanvas.addEventListener('mouseup', () => {
-    isDrawing = false;
-});
-
-drawingCanvas.addEventListener('mouseleave', () => {
-    isDrawing = false;
-});
-
-document.getElementById('cancelDrawingBtn').addEventListener('click', () => {
-    document.getElementById('drawingModal').classList.remove('active');
-});
-
-document.getElementById('saveDrawingBtn').addEventListener('click', () => {
-    const canvas = document.getElementById('drawingCanvas');
-    const dataUrl = canvas.toDataURL('image/png');
-    
-    currentEditingMedia.push({
-        type: 'drawing',
-        data: dataUrl
-    });
-    renderMediaAttachments();
-    
-    document.getElementById('drawingModal').classList.remove('active');
-});
-
-// Dynamic node type buttons
-function updateNodeTypeButtons() {
-    const container = document.getElementById('nodeTypeButtons');
-    container.innerHTML = '';
-    
-    getAllNodeTypes().forEach(type => {
-        const btn = document.createElement('button');
-        btn.className = 'tool-btn';
-        btn.dataset.type = type.id;
-        btn.textContent = type.name;
-        btn.addEventListener('click', () => {
-            const worldCenter = screenToWorld(canvas.width / 2, canvas.height / 2);
-            const node = createNode(type.id, worldCenter.x, worldCenter.y);
-            editNode(node);
-        });
-        container.appendChild(btn);
-    });
-    
-    // Update node type dropdown in modal
-    const select = document.getElementById('nodeType');
-    select.innerHTML = '';
-    getAllNodeTypes().forEach(type => {
-        const option = document.createElement('option');
-        option.value = type.id;
-        option.textContent = type.name;
-        select.appendChild(option);
-    });
-}
-
-// Tool buttons (kept from original)
-document.querySelectorAll('.tool-btn[data-type]').forEach(btn => {
-    btn.addEventListener('click', () => {
-        const type = btn.dataset.type;
-        const worldCenter = screenToWorld(canvas.width / 2, canvas.height / 2);
-        const node = createNode(type, worldCenter.x, worldCenter.y);
-        editNode(node);
-    });
-});
-
-// Tool selection
-document.getElementById('selectTool').addEventListener('click', () => {
-    state.tool = 'select';
-    state.linkingFrom = null;
-    document.querySelectorAll('.tool-btn').forEach(b => b.classList.remove('active'));
-    document.getElementById('selectTool').classList.add('active');
-    render();
-});
-
-document.getElementById('linkTool').addEventListener('click', () => {
-    state.tool = 'link';
-    document.querySelectorAll('.tool-btn').forEach(b => b.classList.remove('active'));
-    document.getElementById('linkTool').classList.add('active');
-});
-
-// View mode switching
-document.querySelectorAll('.view-mode-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
-        const view = btn.dataset.view;
-        state.viewMode = view;
-        
-        document.querySelectorAll('.view-mode-btn').forEach(b => b.classList.remove('active'));
-        btn.classList.add('active');
-        
-        if (view === 'graph') {
-            document.getElementById('canvas').style.display = 'block';
-            document.getElementById('listView').classList.remove('active');
-        } else if (view === 'list') {
-            document.getElementById('canvas').style.display = 'none';
-            document.getElementById('listView').classList.add('active');
-            updateListView();
-        }
-    });
-});
-
-// Modal
-const modal = document.getElementById('nodeModal');
-const colorPicker = document.getElementById('colorPicker');
-const customTypeColorPicker = document.getElementById('customTypeColorPicker');
-
-// Initialize both color pickers
-[colorPicker, customTypeColorPicker].forEach(picker => {
-    colors.forEach(color => {
-        const opt = document.createElement('div');
-        opt.className = 'color-option';
-        opt.style.backgroundColor = color;
-        opt.addEventListener('click', () => {
-            picker.querySelectorAll('.color-option').forEach(o => o.classList.remove('selected'));
-            opt.classList.add('selected');
-        });
-        picker.appendChild(opt);
-    });
-});
-
-document.getElementById('cancelNodeBtn').addEventListener('click', () => {
-    modal.classList.remove('active');
-});
-
-document.getElementById('createNodeBtn').addEventListener('click', () => {
-    // This is handled by editNode for editing
-    // For new nodes, this won't be called as editNode overrides it
-});
-
-document.getElementById('cancelLinkBtn').addEventListener('click', () => {
-    document.getElementById('linkModal').classList.remove('active');
-});
-
-// Nodes list
-function updateNodesList() {
-    const list = document.getElementById('nodesList');
-    const title = list.querySelector('.sidebar-title');
+function updateCollaboratorsList() {
+    const list = $('collaboratorsList'); if (!list) return;
     list.innerHTML = '';
-    list.appendChild(title);
-    
-    const filteredNodes = getFilteredNodes();
-    
-    filteredNodes.forEach(node => {
+    S.collab.collaborators.forEach((c, id) => {
         const item = document.createElement('div');
-        item.className = 'node-item';
-        
-        const tagsHtml = (node.tags || []).length > 0 
-            ? `<div style="font-size: 0.65rem; color: var(--accent-primary); margin-top: 0.25rem;">${(node.tags || []).join(', ')}</div>`
-            : '';
-        
-        item.innerHTML = `
-            <div>
-                <div style="font-weight: 600;">${node.name}</div>
-                <div class="node-item-type">${node.type}</div>
-                ${tagsHtml}
-            </div>
-            <span class="node-item-delete">×</span>
-        `;
-        
-        item.addEventListener('click', (e) => {
-            if (e.target.classList.contains('node-item-delete')) {
-                deleteNode(node.id);
-            } else {
-                state.selectedNode = node.id;
-                
-                // Pan to node
-                state.camera.x = canvas.width / 2 - node.x * state.camera.zoom;
-                state.camera.y = canvas.height / 2 - node.y * state.camera.zoom;
-                
-                render();
-            }
-        });
-        
+        item.textContent = `User ${id.substring(0,4)}`;
+        item.style.color = c.color;
         list.appendChild(item);
     });
 }
 
-// List view
-function updateListView() {
-    const grid = document.getElementById('listViewGrid');
-    grid.innerHTML = '';
-    
-    const filteredNodes = getFilteredNodes();
-    
-    filteredNodes.forEach(node => {
-        const connections = state.links.filter(l => l.from === node.id || l.to === node.id);
-        
-        const tagsHtml = (node.tags || []).length > 0
-            ? `<div style="margin-top: 0.5rem;">${(node.tags || []).map(tag => 
-                `<span class="tag" style="margin-right: 0.25rem;">${tag}</span>`
-            ).join('')}</div>`
-            : '';
-        
-        const attrsHtml = Object.keys(node.attributes || {}).length > 0
-            ? `<div style="margin-top: 0.5rem; font-size: 0.75rem; color: var(--text-secondary);">${
-                Object.entries(node.attributes || {}).map(([k, v]) => 
-                    `<div><strong>${k}:</strong> ${v || '(empty)'}</div>`
-                ).join('')
-            }</div>`
-            : '';
-        
-        // Build connections display
-        let connectionsHtml = `<div class="list-card-connections" style="margin-top: 0.75rem;">${connections.length} connections</div>`;
-        if (connections.length > 0) {
-            connectionsHtml += '<div style="font-size: 0.7rem; color: var(--text-secondary); margin-top: 0.25rem;">';
-            connections.slice(0, 3).forEach(link => {
-                const otherNodeId = link.from === node.id ? link.to : link.from;
-                const otherNode = state.nodes.find(n => n.id === otherNodeId);
-                if (otherNode) {
-                    const direction = link.from === node.id ? '→' : '←';
-                    const labelText = link.label ? ` (${link.label})` : '';
-                    connectionsHtml += `<div>${direction} ${otherNode.name}${labelText}</div>`;
-                }
-            });
-            if (connections.length > 3) {
-                connectionsHtml += `<div>... and ${connections.length - 3} more</div>`;
-            }
-            connectionsHtml += '</div>';
-        }
-        
-        const card = document.createElement('div');
-        card.className = 'list-card';
-        card.innerHTML = `
-            <div class="list-card-header">
-                <div>
-                    <div class="list-card-title">${node.name}</div>
-                    <div class="list-card-type">${node.type}</div>
-                </div>
-                <div class="list-card-color" style="background: ${node.color};"></div>
-            </div>
-            <div class="list-card-description">${node.description || 'No description'}</div>
-            ${tagsHtml}
-            ${attrsHtml}
-            ${connectionsHtml}
-        `;
-        
-        card.addEventListener('click', () => {
-            state.selectedNode = node.id;
-            state.viewMode = 'graph';
-            
-            // Switch to graph view
-            document.querySelector('[data-view="graph"]').click();
-            
-            // Pan to node
-            state.camera.x = canvas.width / 2 - node.x * state.camera.zoom;
-            state.camera.y = canvas.height / 2 - node.y * state.camera.zoom;
-            
-            render();
-        });
-        
-        grid.appendChild(card);
-    });
-}
-
-// Save/Load
-document.getElementById('saveBtn').addEventListener('click', () => {
-    const nexusName = document.getElementById('nexusName').value || 'untitled';
-    const data = {
-        name: nexusName,
-        nodes: state.nodes,
-        links: state.links,
-        customNodeTypes: state.customNodeTypes,
-        templates: state.templates
-    };
-    
-    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `${nexusName.replace(/\s+/g, '-')}.nexus.json`;
-    a.click();
-    URL.revokeObjectURL(url);
-});
-
-document.getElementById('loadBtn').addEventListener('click', () => {
-    const input = document.createElement('input');
-    input.type = 'file';
-    input.accept = '.json';
-    input.addEventListener('change', (e) => {
-        const file = e.target.files[0];
-        if (file) {
-            const reader = new FileReader();
-            reader.onload = (event) => {
-                try {
-                    const data = JSON.parse(event.target.result);
-                    document.getElementById('nexusName').value = data.name || 'Untitled World';
-                    state.nodes = data.nodes || [];
-                    state.links = data.links || [];
-                    state.customNodeTypes = data.customNodeTypes || [];
-                    state.templates = data.templates || [];
-                    updateNodesList();
-                    updateListView();
-                    updateFilterOptions();
-                    updateNodeTypeButtons();
-                    render();
-                    broadcastState();
-                } catch (err) {
-                    alert('Error loading file: ' + err.message);
-                }
-            };
-            reader.readAsText(file);
-        }
-    });
-    input.click();
-});
-
-// Settings modal
-document.getElementById('settingsBtn').addEventListener('click', () => {
-    const modal = document.getElementById('settingsModal');
-    modal.classList.add('active');
-    updateNodeTypesList();
-    updateTemplatesList();
-    updateTemplateNodeSelect();
-});
-
-document.getElementById('closeSettingsBtn').addEventListener('click', () => {
-    document.getElementById('settingsModal').classList.remove('active');
-});
-
-// Custom node type modal
-document.getElementById('addNodeTypeBtn').addEventListener('click', () => {
-    showCustomTypeModal();
-});
-
-document.getElementById('addCustomNodeType').addEventListener('click', () => {
-    showCustomTypeModal();
-});
-
-function showCustomTypeModal() {
-    const modal = document.getElementById('customTypeModal');
-    document.getElementById('customTypeName').value = '';
-    document.getElementById('customTypeAttributes').value = '';
-    
-    // Reset color picker
-    document.querySelectorAll('#customTypeColorPicker .color-option').forEach(opt => {
-        opt.classList.remove('selected');
-    });
-    document.querySelector('#customTypeColorPicker .color-option').classList.add('selected');
-    
-    modal.classList.add('active');
-}
-
-document.getElementById('cancelCustomTypeBtn').addEventListener('click', () => {
-    document.getElementById('customTypeModal').classList.remove('active');
-});
-
-document.getElementById('createCustomTypeBtn').addEventListener('click', () => {
-    const name = document.getElementById('customTypeName').value.trim();
-    if (!name) {
-        alert('Please enter a type name');
-        return;
-    }
-    
-    const id = name.toLowerCase().replace(/\s+/g, '_');
-    
-    // Check if already exists
-    if (getAllNodeTypes().find(t => t.id === id)) {
-        alert('A type with this name already exists');
-        return;
-    }
-    
-    const selectedColor = document.querySelector('#customTypeColorPicker .color-option.selected');
-    const color = selectedColor ? selectedColor.style.backgroundColor : colors[0];
-    
-    const attrsInput = document.getElementById('customTypeAttributes').value.trim();
-    const defaultAttributes = attrsInput ? attrsInput.split(',').map(a => a.trim()).filter(a => a) : [];
-    
-    const newType = {
-        id: id,
-        name: name,
-        color: color,
-        defaultAttributes: defaultAttributes,
-        custom: true
-    };
-    
-    state.customNodeTypes.push(newType);
-    updateNodeTypeButtons();
-    updateFilterOptions();
-    broadcastState();
-    saveToLocalStorage();
-    
-    document.getElementById('customTypeModal').classList.remove('active');
-    
-    if (document.getElementById('settingsModal').classList.contains('active')) {
-        updateNodeTypesList();
-    }
-});
-
-function updateNodeTypesList() {
-    const list = document.getElementById('nodeTypesList');
-    list.innerHTML = '';
-    
-    getAllNodeTypes().forEach(type => {
-        const item = document.createElement('div');
-        item.className = 'node-type-item';
-        item.innerHTML = `
-            <div>
-                <span class="node-type-item-name">${type.name}</span>
-                ${type.custom ? ' <span style="font-size: 0.7rem; color: var(--text-secondary);">(custom)</span>' : ''}
-            </div>
-            <div class="node-type-item-actions">
-                <div style="width: 30px; height: 30px; background: ${type.color}; border-radius: 3px; border: 1px solid var(--border);"></div>
-                ${type.custom ? '<span class="node-type-item-delete">×</span>' : ''}
-            </div>
-        `;
-        
-        if (type.custom) {
-            item.querySelector('.node-type-item-delete').addEventListener('click', () => {
-                if (confirm(`Delete custom type "${type.name}"? Existing nodes will keep their type.`)) {
-                    state.customNodeTypes = state.customNodeTypes.filter(t => t.id !== type.id);
-                    updateNodeTypeButtons();
-                    updateFilterOptions();
-                    updateNodeTypesList();
-                    broadcastState();
-                    saveToLocalStorage();
-                }
-            });
-        }
-        
-        list.appendChild(item);
-    });
-}
-
-// Templates
-function updateTemplateNodeSelect() {
-    const select = document.getElementById('templateNodeSelect');
-    select.innerHTML = '<option value="">Select a node...</option>';
-    
-    state.nodes.forEach(node => {
-        const option = document.createElement('option');
-        option.value = node.id;
-        option.textContent = `${node.name} (${node.type})`;
-        select.appendChild(option);
-    });
-}
-
-document.getElementById('saveTemplateBtn').addEventListener('click', () => {
-    const nodeId = document.getElementById('templateNodeSelect').value;
-    if (!nodeId) {
-        alert('Please select a node');
-        return;
-    }
-    
-    const node = state.nodes.find(n => n.id == nodeId);
-    if (!node) return;
-    
-    const templateName = prompt('Template name:', node.name + ' Template');
-    if (!templateName) return;
-    
-    const template = {
-        id: Date.now(),
-        name: templateName,
-        type: node.type,
-        description: node.description,
-        color: node.color,
-        tags: [...(node.tags || [])],
-        attributes: {...(node.attributes || {})}
-    };
-    
-    state.templates.push(template);
-    updateTemplatesList();
-    broadcastState();
-    saveToLocalStorage();
-});
-
-function updateTemplatesList() {
-    const list = document.getElementById('templatesList');
-    list.innerHTML = '';
-    
-    if (state.templates.length === 0) {
-        list.innerHTML = '<p style="color: var(--text-secondary); font-size: 0.875rem;">No templates yet</p>';
-        return;
-    }
-    
-    state.templates.forEach(template => {
-        const item = document.createElement('div');
-        item.className = 'template-item';
-        item.innerHTML = `
-            <div>
-                <div style="font-weight: 500;">${template.name}</div>
-                <div style="font-size: 0.75rem; color: var(--text-secondary);">${template.type}</div>
-            </div>
-            <div class="template-item-actions">
-                <button class="btn" data-action="use"><span>Use</span></button>
-                <button class="btn" data-action="delete"><span>Delete</span></button>
-            </div>
-        `;
-        
-        item.querySelector('[data-action="use"]').addEventListener('click', () => {
-            const worldCenter = screenToWorld(canvas.width / 2, canvas.height / 2);
-            const node = {
-                id: Date.now() + Math.random(),
-                type: template.type,
-                name: template.name,
-                description: template.description,
-                color: template.color,
-                tags: [...template.tags],
-                attributes: {...template.attributes},
-                x: worldCenter.x,
-                y: worldCenter.y
-            };
-            
-            state.nodes.push(node);
-            updateNodesList();
-            updateListView();
-            updateFilterOptions();
-            render();
-            broadcastState();
-            
-            document.getElementById('settingsModal').classList.remove('active');
-        });
-        
-        item.querySelector('[data-action="delete"]').addEventListener('click', () => {
-            if (confirm(`Delete template "${template.name}"?`)) {
-                state.templates = state.templates.filter(t => t.id !== template.id);
-                updateTemplatesList();
-                broadcastState();
-                saveToLocalStorage();
-            }
-        });
-        
-        list.appendChild(item);
-    });
-}
-
-document.getElementById('clearBtn').addEventListener('click', () => {
-    if (confirm('Are you sure you want to clear everything?')) {
-        state.nodes = [];
-        state.links = [];
-        state.selectedNode = null;
-        state.linkingFrom = null;
-        updateNodesList();
-        updateListView();
-        render();
-        broadcastState();
-    }
-});
-
-// ==================== COLLABORATION ====================
-
-// BroadcastChannel for real-time sync
-const channel = new BroadcastChannel('nexus-collab');
-
-function broadcastState() {
-    const nexusName = document.getElementById('nexusName').value || 'Untitled World';
-    const data = {
-        type: 'state',
-        id: state.myId,
-        name: nexusName,
-        nodes: state.nodes,
-        links: state.links,
-        customNodeTypes: state.customNodeTypes,
-        templates: state.templates
-    };
-    
-    // Broadcast locally (same browser)
-    channel.postMessage(data);
-    
-    // Broadcast to peers (internet)
-    broadcastStateToPeers();
-    
-    saveToLocalStorage();
-}
-
-function broadcastCursor(x, y) {
-    channel.postMessage({
-        type: 'cursor',
-        id: state.myId,
-        color: state.myColor,
-        x: x,
-        y: y
-    });
-    
-    broadcastCursorToPeers(x, y);
-}
-
-channel.addEventListener('message', (event) => {
-    const data = event.data;
-    
-    if (data.id === state.myId) return; // Ignore own messages
-    
-    if (data.type === 'state') {
-        // Update from other user
-        state.nodes = data.nodes;
-        state.links = (data.links || []).map(link => ({
-            id: link.id || (Date.now() + Math.random()),
-            from: link.from,
-            to: link.to,
-            label: link.label || '',
-            description: link.description || ''
-        }));
-        state.customNodeTypes = data.customNodeTypes || [];
-        state.templates = data.templates || [];
-        document.getElementById('nexusName').value = data.name;
-        updateNodesList();
-        updateListView();
-        updateFilterOptions();
-        updateNodeTypeButtons();
-        render();
-        
-        // Track collaborator
-        if (!state.collaborators.has(data.id)) {
-            state.collaborators.set(data.id, {
-                id: data.id,
-                color: `hsl(${Math.random() * 360}, 70%, 60%)`,
-                lastSeen: Date.now()
-            });
-            updateCollaboratorsList();
-        }
-    } else if (data.type === 'cursor') {
-        // Update cursor
-        updateCollaboratorCursor(data.id, data.color, data.x, data.y);
-        
-        if (!state.collaborators.has(data.id)) {
-            state.collaborators.set(data.id, {
-                id: data.id,
-                color: data.color,
-                lastSeen: Date.now()
-            });
-            updateCollaboratorsList();
-        }
-    }
-});
-
-// Cursor rendering
 function updateCollaboratorCursor(id, color, x, y) {
     let cursor = document.getElementById(`cursor-${id}`);
     if (!cursor) {
         cursor = document.createElement('div');
         cursor.id = `cursor-${id}`;
         cursor.className = 'collab-cursor';
-        cursor.innerHTML = `
-            <svg width="24" height="24" viewBox="0 0 24 24">
-                <path d="M5 3 L19 12 L12 13 L9 19 Z" fill="${color}" stroke="white" stroke-width="1"/>
-            </svg>
-            <div class="collab-cursor-name" style="color: ${color};">User ${id.substring(0, 4)}</div>
-        `;
-        document.getElementById('canvasContainer').appendChild(cursor);
+        cursor.innerHTML = `<div class="collab-cursor-name" style="color: ${color};">User ${id.substring(0,4)}</div>`;
+        document.getElementById('canvas').appendChild(cursor);
     }
     cursor.style.left = x + 'px';
     cursor.style.top = y + 'px';
-    
-    // Update last seen
-    const collab = state.collaborators.get(id);
-    if (collab) {
-        collab.lastSeen = Date.now();
+    const c = S.collab.collaborators.get(id);
+    if (c) c.lastSeen = Date.now();
+    else {
+        S.collab.collaborators.set(id, { color, lastSeen: Date.now() });
+        updateCollaboratorsList();
     }
 }
 
-// Clean up old collaborators
 setInterval(() => {
     const now = Date.now();
-    state.collaborators.forEach((collab, id) => {
-        if (now - collab.lastSeen > 5000) {
-            state.collaborators.delete(id);
-            const cursor = document.getElementById(`cursor-${id}`);
-            if (cursor) cursor.remove();
+    S.collab.collaborators.forEach((c,id) => {
+        if (now - c.lastSeen > 5000) {
+            S.collab.collaborators.delete(id);
+            const cur = document.getElementById(`cursor-${id}`);
+            if (cur) cur.remove();
             updateCollaboratorsList();
         }
     });
 }, 2000);
 
-// Share panel
-document.getElementById('shareBtn').addEventListener('click', () => {
-    const panel = document.getElementById('sharePanel');
+// share panel event listeners
+$('btnShare').addEventListener('click', () => {
+    const panel = $('sharePanel');
     panel.classList.add('active');
-    
-    // Generate shareable URL with room code
-    let url;
-    if (state.roomCode) {
-        url = window.location.origin + window.location.pathname + '?room=' + state.roomCode;
-    } else {
-        // Fallback to old hash-based sharing
-        const nexusName = document.getElementById('nexusName').value || 'Untitled World';
-        const data = {
-            name: nexusName,
-            nodes: state.nodes,
-            links: state.links,
-            customNodeTypes: state.customNodeTypes,
-            templates: state.templates
-        };
-        const encoded = btoa(encodeURIComponent(JSON.stringify(data)));
-        url = window.location.origin + window.location.pathname + '#' + encoded;
-    }
-    
-    document.getElementById('shareUrl').textContent = url;
+    if (!S.collab.roomCode) createRoom();
+    const url = window.location.origin + window.location.pathname + '?room=' + S.collab.roomCode;
+    $('shareUrl').textContent = url;
     updateCollaboratorsList();
 });
-
-document.getElementById('closeShareBtn').addEventListener('click', () => {
-    document.getElementById('sharePanel').classList.remove('active');
-});
-
-document.getElementById('copyUrlBtn').addEventListener('click', () => {
-    const url = document.getElementById('shareUrl').textContent;
+$('closeShareBtn').addEventListener('click', () => $('sharePanel').classList.remove('active'));
+$('copyUrlBtn').addEventListener('click', () => {
+    const url = $('shareUrl').textContent;
     navigator.clipboard.writeText(url).then(() => {
-        const btn = document.getElementById('copyUrlBtn');
-        const originalText = btn.innerHTML;
+        const btn = $('copyUrlBtn');
+        const orig = btn.innerHTML;
         btn.innerHTML = '<span>Copied!</span>';
-        setTimeout(() => {
-            btn.innerHTML = originalText;
-        }, 2000);
+        setTimeout(() => btn.innerHTML = orig, 2000);
     });
 });
 
-function updateCollaboratorsList() {
-    const list = document.getElementById('collaboratorsList');
-    list.innerHTML = '';
-    
-    // Add self
-    const selfItem = document.createElement('div');
-    selfItem.className = 'collaborator-item';
-    selfItem.innerHTML = `
-        <div class="collaborator-dot" style="background: ${state.myColor};"></div>
-        <span>You ${state.isHost ? '(Host)' : ''}</span>
-    `;
-    list.appendChild(selfItem);
-    
-    // Add local collaborators (same browser)
-    state.collaborators.forEach((collab, id) => {
-        const item = document.createElement('div');
-        item.className = 'collaborator-item';
-        item.innerHTML = `
-            <div class="collaborator-dot" style="background: ${collab.color};"></div>
-            <span>User ${id.substring(0, 6)} (local)</span>
-        `;
-        list.appendChild(item);
-    });
-    
-    // Add peer collaborators (internet)
-    state.connections.forEach((conn, peerId) => {
-        const item = document.createElement('div');
-        item.className = 'collaborator-item';
-        const color = `hsl(${Math.abs(peerId.split('').reduce((a,b) => a + b.charCodeAt(0), 0)) % 360}, 70%, 60%)`;
-        item.innerHTML = `
-            <div class="collaborator-dot" style="background: ${color};"></div>
-            <span>Peer ${peerId.substring(6, 12)}</span>
-        `;
-        list.appendChild(item);
-    });
-    
-    if (state.collaborators.size === 0 && state.connections.size === 0) {
-        const emptyMsg = document.createElement('div');
-        emptyMsg.style.color = 'var(--text-tertiary)';
-        emptyMsg.style.padding = '0.5rem';
-        emptyMsg.style.fontSize = '0.85rem';
-        emptyMsg.textContent = 'No other collaborators yet';
-        list.appendChild(emptyMsg);
+// cursor broadcasting
+document.addEventListener('mousemove', e => {
+    if (S.collab && S.collab.connections.size) {
+        const r = canv.getBoundingClientRect();
+        broadcastCursorToPeers(e.clientX - r.left, e.clientY - r.top);
     }
-}
-
-// ==================== LOCAL STORAGE ====================
-
-function saveToLocalStorage() {
-    const nexusName = document.getElementById('nexusName').value || 'Untitled World';
-    const data = {
-        name: nexusName,
-        nodes: state.nodes,
-        links: state.links,
-        camera: state.camera,
-        customNodeTypes: state.customNodeTypes,
-        templates: state.templates
-    };
-    localStorage.setItem('nexus-autosave', JSON.stringify(data));
-}
-
-function loadFromLocalStorage() {
-    const saved = localStorage.getItem('nexus-autosave');
-    if (saved) {
-        try {
-            const data = JSON.parse(saved);
-            document.getElementById('nexusName').value = data.name || 'Untitled World';
-            state.nodes = data.nodes || [];
-            state.links = (data.links || []).map(link => ({
-                id: link.id || (Date.now() + Math.random()),
-                from: link.from,
-                to: link.to,
-                label: link.label || '',
-                description: link.description || ''
-            }));
-            state.customNodeTypes = data.customNodeTypes || [];
-            state.templates = data.templates || [];
-            if (data.camera) {
-                state.camera = data.camera;
-            }
-            updateNodesList();
-            updateListView();
-            updateFilterOptions();
-            updateNodeTypeButtons();
-            render();
-        } catch (err) {
-            console.error('Error loading autosave:', err);
-        }
-    }
-}
-
-// ==================== URL SHARING ====================
-
-function loadFromURL() {
-    const hash = window.location.hash.substring(1);
-    if (hash) {
-        try {
-            const decoded = JSON.parse(decodeURIComponent(atob(hash)));
-            document.getElementById('nexusName').value = decoded.name || 'Untitled World';
-            state.nodes = decoded.nodes || [];
-            state.links = (decoded.links || []).map(link => ({
-                id: link.id || (Date.now() + Math.random()),
-                from: link.from,
-                to: link.to,
-                label: link.label || '',
-                description: link.description || ''
-            }));
-            state.customNodeTypes = decoded.customNodeTypes || [];
-            state.templates = decoded.templates || [];
-            updateNodesList();
-            updateListView();
-            updateFilterOptions();
-            updateNodeTypeButtons();
-            render();
-            broadcastState();
-        } catch (err) {
-            console.error('Error loading from URL:', err);
-        }
-    }
-}
-
-// ==================== INITIALIZATION ====================
-
-window.addEventListener('load', () => {
-    const loading = document.getElementById('loading');
-    loading.classList.add('active');
-    
-    setTimeout(() => {
-        // Load from URL first, then from localStorage if no URL
-        if (window.location.hash) {
-            loadFromURL();
-        } else {
-            loadFromLocalStorage();
-        }
-        
-        // Initialize UI
-        updateNodeTypeButtons();
-        updateFilterOptions();
-        
-        // Initialize PeerJS networking
-        initializePeer();
-        
-        loading.classList.remove('active');
-        
-        // Initial render
-        render();
-        
-        // Announce presence
-        broadcastState();
-    }, 1000);
 });
 
-// Auto-save every 10 seconds
-setInterval(() => {
-    if (state.nodes.length > 0) {
-        saveToLocalStorage();
-    }
-}, 10000);
+// join room from URL param
+const urlRoom = getQueryParam('room');
+if (urlRoom) joinRoom(urlRoom);
 
-// Update nexus name
-document.getElementById('nexusName').addEventListener('input', () => {
-    broadcastState();
-});
+/* ── INIT ── */
+initSidebar(); setTool('select');
+const saved = localStorage.getItem('nexus-v3');
+if (saved) { try { loadData(JSON.parse(saved)); } catch (e) { applyCamera(); applyOpts(S.opts); } }
+else { applyCamera(); applyOpts(S.opts); }
+updateEmpty(); canv.focus();
