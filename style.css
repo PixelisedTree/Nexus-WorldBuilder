@@ -741,6 +741,15 @@ textarea:focus-visible,
     word-break: break-word
 }
 
+.ndesc {
+    font-size: 11px;
+    color: var(--text-mid);
+    margin-top: 2px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
 .nct {
     font-size: 11px;
     font-weight: 600;

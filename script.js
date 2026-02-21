@@ -77,6 +77,7 @@ function createNode(typeId, x, y, skipModal) {
     refreshList();
     updateEmpty();
     if (!skipModal) openModal(n);
+    broadcastAction('addNode', n);
     autoSave();
     say(`Created ${t.name} node.`);
     return n;
@@ -100,7 +101,14 @@ function mountNode(n, isNew) {
     const c = nc(n);
     el.style.left = n.x + 'px'; el.style.top = n.y + 'px';
     el.style.setProperty('--c', c);
-    el.setAttribute('aria-label', `${n.name}, ${n.type}`);
+    // include description in title and aria-label so users can see it
+    if (n.desc) {
+        el.setAttribute('aria-label', `${n.name}, ${n.type}, ${n.desc}`);
+        el.title = n.desc;
+    } else {
+        el.setAttribute('aria-label', `${n.name}, ${n.type}`);
+        el.removeAttribute('title');
+    }
 
     // get connected links and count
     const connectedLinks = S.links.filter(l => l.from === n.id || l.to === n.id);
@@ -113,9 +121,11 @@ function mountNode(n, isNew) {
     const tHtml = (S.opts.tags && n.tags.length) ? `<div class="nchips">${n.tags.slice(0, 3).map(t => `<span class="nchip">${t}</span>`).join('')}</div>` : '';
 
     // include a container for linked-node "liens"
+    const descHtml = n.desc ? `<div class="ndesc" title="${n.desc}">${n.desc}</div>` : '';
     el.innerHTML = `<div class="nstripe"></div>
                     <div class="nrow"><span class="nbadge">${n.type}</span><span class="nicon" aria-hidden="true">${gt(n.type).icon}</span></div>
                     <div class="ntitle">${n.name}</div>
+                    ${descHtml}
                     ${ctHtml}
                     ${tHtml}
                     <div class="nlinks"></div>`;
@@ -173,13 +183,16 @@ function mountNode(n, isNew) {
     }
 }
 
-function delNode(id) {
+function delNode(id, skipBroadcast) {
     S.nodes = S.nodes.filter(n => n.id !== id);
     S.links = S.links.filter(l => l.from !== id && l.to !== id);
     document.getElementById('n-' + id)?.remove();
     if (S.selNode === id) { S.selNode = null; S.kbIdx = -1; }
     if (S.connFrom === id) cancelConn();
-    renderLinks(); refreshList(); updateEmpty(); autoSave(); say('Node deleted.');
+    renderLinks(); refreshList(); updateEmpty();
+    if (!skipBroadcast) broadcastAction('deleteNode', { id });
+    autoSave();
+    say('Node deleted.');
 }
 
 function selNode(id) {
@@ -200,10 +213,16 @@ function nodeKey(e, id) {
 
 /* ── LINKS ── */
 function createLink(from, to) {
-    if (S.links.find(l => (l.from === from && l.to === to) || (l.from === to && l.to === from))) return;
-    S.links.push({ id: uid(), from, to, label: '' });
+    if (S.links.find(l => (l.from === from && l.to === to) || (l.from === to && l.to === from))) {
+        say('Nodes are already connected.');
+        return;
+    }
+    const lk = { id: uid(), from, to, label: '' };
+    S.links.push(lk);
     [from, to].forEach(id => { const n = S.nodes.find(x => x.id === id); if (n) mountNode(n); });
-    renderLinks(); autoSave();
+    renderLinks();
+    broadcastAction('addLink', lk);
+    autoSave();
     const fn = S.nodes.find(n => n.id === from), tn = S.nodes.find(n => n.id === to);
     say(`Connected ${fn?.name || 'node'} to ${tn?.name || 'node'}.`);
 }
@@ -233,14 +252,26 @@ function renderLinks() {
         $('svgLayer').appendChild(mkL(x1, y1, x2, y2, 'var(--accent)', 1.5, false, isSel ? 'url(#arrs)' : 'url(#arr)', isSel ? 1 : .5));
         if (lk.label) {
             const mx = (fn.x + tn.x) / 2, my = (fn.y + tn.y) / 2;
+            const lines = lk.label.split('\n');
+            const lineHeight = 12;
+            const pad = 8;
+            const height = lines.length * lineHeight + 2;
             const bg = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
-            bg.setAttribute('x', mx - 28); bg.setAttribute('y', my - 7); bg.setAttribute('width', 56); bg.setAttribute('height', 14);
+            bg.setAttribute('x', mx - 28); bg.setAttribute('y', my - height/2); bg.setAttribute('width', 56); bg.setAttribute('height', height);
             bg.setAttribute('rx', 3); bg.setAttribute('fill', 'var(--surface)'); $('svgLayer').appendChild(bg);
             const txt = document.createElementNS('http://www.w3.org/2000/svg', 'text');
-            txt.setAttribute('x', mx); txt.setAttribute('y', my); txt.setAttribute('text-anchor', 'middle');
-            txt.setAttribute('dominant-baseline', 'middle'); txt.setAttribute('fill', 'var(--text-mid)');
+            txt.setAttribute('x', mx); txt.setAttribute('y', my - (lines.length-1) * (lineHeight/2));
+            txt.setAttribute('text-anchor', 'middle');
+            txt.setAttribute('fill', 'var(--text-mid)');
             txt.setAttribute('font-size', '10'); txt.setAttribute('font-family', 'Nunito Sans,sans-serif');
-            txt.textContent = lk.label; $('svgLayer').appendChild(txt);
+            lines.forEach((ln, idx) => {
+                const tspan = document.createElementNS('http://www.w3.org/2000/svg', 'tspan');
+                tspan.setAttribute('x', mx);
+                tspan.setAttribute('dy', idx === 0 ? 0 : lineHeight);
+                tspan.textContent = ln;
+                txt.appendChild(tspan);
+            });
+            $('svgLayer').appendChild(txt);
         }
     }
 }
@@ -342,8 +373,14 @@ document.addEventListener('keydown', e => {
     if (e.key === 'c') setTool('connect');
     if (e.key === 'e' && sn) openModal(sn);
     if ((e.key === 'Delete' || e.key === 'Backspace') && !e.target.matches('input,textarea')) {
-        if (S.selNode) { delNode(S.selNode); autoSave(); }
-        else if (S.selLink) { S.links = S.links.filter(l => l.id !== S.selLink); S.selLink = null; renderLinks(); autoSave(); say('Connection deleted.'); }
+        if (S.selNode) { delNode(S.selNode); /*delNode will broadcast*/ autoSave(); }
+        else if (S.selLink) {
+            const old = S.selLink;
+            S.links = S.links.filter(l => l.id !== old);
+            S.selLink = null; renderLinks();
+            broadcastAction('deleteLink', { id: old });
+            autoSave(); say('Connection deleted.');
+        }
     }
     if (e.key === 'Tab' && canv === document.activeElement) {
         e.preventDefault();
@@ -408,10 +445,10 @@ $('ctxN').querySelectorAll('.ctx-it').forEach(it => {
             case 'conn': setTool('connect'); startConn(n.id); break;
             case 'dup': {
                 const dn = { ...n, id: uid(), x: n.x + 40, y: n.y + 40, tags: [...n.tags], name: n.name + ' (copy)' };
-                S.nodes.push(dn); mountNode(dn, true); refreshList(); autoSave(); say(`Duplicated ${n.name}`);
+                S.nodes.push(dn); mountNode(dn, true); refreshList(); broadcastAction('addNode', dn); autoSave(); say(`Duplicated ${n.name}`);
                 break;
             }
-            case 'del': delNode(n.id); autoSave(); break;
+            case 'del': delNode(n.id); /*delNode broadcasts*/ autoSave(); break;
         }
         hideMenus(); prevF?.focus();
     });
@@ -419,10 +456,25 @@ $('ctxN').querySelectorAll('.ctx-it').forEach(it => {
 $('ctxL').querySelectorAll('.ctx-it').forEach(it => {
     it.addEventListener('click', e => {
         e.stopPropagation(); const lk = S.ctxLRef; if (!lk) return;
-        if (it.dataset.a === 'del-link') {
-            S.links = S.links.filter(l => l.id !== lk.id); S.selLink = null; renderLinks();
-            [lk.from, lk.to].forEach(id => { const n = S.nodes.find(x => x.id === id); if (n) mountNode(n); });
-            autoSave(); say('Connection deleted.');
+        switch (it.dataset.a) {
+            case 'edit-label': {
+                const newLbl = prompt('Connection label:', lk.label);
+                if (newLbl !== null) {
+                    lk.label = newLbl;
+                    renderLinks();
+                    broadcastAction('updateLink', lk);
+                    autoSave();
+                    say('Link label updated.');
+                }
+                break;
+            }
+            case 'del-link': {
+                S.links = S.links.filter(l => l.id !== lk.id); S.selLink = null; renderLinks();
+                [lk.from, lk.to].forEach(id => { const n = S.nodes.find(x => x.id === id); if (n) mountNode(n); });
+                broadcastAction('deleteLink', { id: lk.id });
+                autoSave(); say('Connection deleted.');
+                break;
+            }
         }
         hideMenus(); prevF?.focus();
     });
@@ -455,6 +507,7 @@ function refreshList() {
         div.className = 'nli' + (S.selNode === n.id ? ' active' : '');
         div.setAttribute('role', 'listitem'); div.setAttribute('tabindex', '0');
         div.setAttribute('aria-label', `${n.name}, ${n.type}${S.selNode === n.id ? ', selected' : ''}`);
+        if (n.desc) div.title = n.desc;
         div.innerHTML = `<div class="nldot" style="background:${nc(n)}" aria-hidden="true"></div><span class="nlname">${n.name}</span><span class="nltype">${n.type}</span>`;
         const go = () => { selNode(n.id); const r = canv.getBoundingClientRect(); S.cam.x = r.width / 2 - n.x * S.cam.z; S.cam.y = r.height / 2 - n.y * S.cam.z; applyCamera(); say(`Navigated to ${n.name}`); };
         div.addEventListener('click', go);
@@ -501,7 +554,9 @@ $('fBtnSave').addEventListener('click', () => {
     if (!v) { $('fName').focus(); $('fName').setAttribute('aria-invalid', 'true'); return; }
     $('fName').removeAttribute('aria-invalid');
     n.name = v; n.type = $('fType').value; n.desc = $('fDesc').value; n.tags = [...S.editTags]; n.color = S.editColor;
-    mountNode(n); refreshList(); renderLinks(); closeModal(); autoSave(); say(`Saved ${n.name}.`);
+    mountNode(n); refreshList(); renderLinks();
+    broadcastAction('updateNode', n);
+    closeModal(); autoSave(); say(`Saved ${n.name}.`);
 });
 $('fName').addEventListener('keydown', e => { if (e.key === 'Enter') $('fBtnSave').click(); });
 $('fBtnDel').addEventListener('click', () => {
@@ -608,11 +663,7 @@ function autoSave() {
     try {
         localStorage.setItem('nexus-v3', JSON.stringify({ worldName: $('worldName').value, nodes: S.nodes, links: S.links, cam: S.cam, opts: S.opts }));
     } catch (e) { /* ignore */ }
-
-    // if we're collaborating, send the updated state to connected peers
-    if (S.collab && S.collab.connections.size > 0) {
-        broadcastStateToPeers();
-    }
+    // state updates are now handled via actions; don't flood peers with the entire world
 }
 function exportJSON() {
     const name = $('worldName').value || 'nexus-world';
@@ -649,16 +700,25 @@ $('btnImport').addEventListener('click', () => $('fileInput').click());
 $('fileInput').addEventListener('change', e => {
     const f = e.target.files[0]; if (!f) return;
     const r = new FileReader();
-    r.onload = ev => { try { loadData(JSON.parse(ev.target.result)); autoSave(); say('World imported.'); } catch { alert('Invalid file.'); } };
+    r.onload = ev => { try { loadData(JSON.parse(ev.target.result)); autoSave(); say('World imported.');
+            if (S.collab.isHost && S.collab.connections.size) {
+                broadcastStateToPeers();
+            }
+        } catch { alert('Invalid file.'); } };
     r.readAsText(f); e.target.value = '';
 });
 $('btnClear').addEventListener('click', () => {
     if (!confirm('Clear all nodes and connections?')) return;
     S.nodes = []; S.links = []; S.selNode = null; S.selLink = null; S.kbIdx = -1;
     $('world').querySelectorAll('.node').forEach(n => n.remove());
-    renderLinks(); refreshList(); updateEmpty(); autoSave(); say('Canvas cleared.');
+    renderLinks(); refreshList(); updateEmpty();
+    broadcastAction('clearAll', null);
+    autoSave(); say('Canvas cleared.');
 });
-$('worldName').addEventListener('input', autoSave);
+$('worldName').addEventListener('input', () => {
+    autoSave();
+    broadcastAction('setWorldName', $('worldName').value);
+});
 
 /* ── MISC ── */
 function updateEmpty() { $('emptySt').classList.toggle('gone', S.nodes.length > 0); }
@@ -748,7 +808,9 @@ function handleConnection(conn) {
                 data: {
                     worldName: $('worldName').value,
                     nodes: S.nodes,
-                    links: S.links
+                    links: S.links,
+                    cam: S.cam,
+                    opts: S.opts
                 }
             });
         }
@@ -763,20 +825,133 @@ function handleConnection(conn) {
     });
 }
 
+// apply a received state object to the local app
+function applyState(d) {
+    if (d.worldName !== undefined) $('worldName').value = d.worldName;
+    // full replace nodes/links so every peer ends up with identical arrays
+    S.nodes = d.nodes || [];
+    S.links = d.links || [];
+
+    // tear down any existing node elements and rebuild
+    $('world').querySelectorAll('.node').forEach(n => n.remove());
+    S.nodes.forEach(n => mountNode(n));
+    renderLinks();
+    refreshList();
+    updateEmpty();
+
+    // optional camera/option sync (host may choose not to send these)
+    if (d.cam) { S.cam = { ...S.cam, ...d.cam }; applyCamera(); }
+    if (d.opts) { Object.assign(S.opts, d.opts); applyOpts(S.opts); }
+}
+
+// apply a single action message (add/update/delete/move nodes or links)
+function applyAction(action, data) {
+    switch (action) {
+        case 'addNode': {
+            // ignore if already exist
+            if (!S.nodes.find(n => n.id === data.id)) {
+                S.nodes.push(data);
+                mountNode(data);
+                refreshList(); updateEmpty();
+            }
+            break;
+        }
+        case 'updateNode': {
+            const n = S.nodes.find(n => n.id === data.id);
+            if (n) {
+                Object.assign(n, data);
+                mountNode(n);
+                refreshList(); renderLinks();
+            }
+            break;
+        }
+        case 'deleteNode': {
+            // perform local deletion without rebroadcasting
+            delNode(data.id, true);
+            break;
+        }
+        case 'moveNode': {
+            const n = S.nodes.find(n => n.id === data.id);
+            if (n) {
+                n.x = data.x; n.y = data.y;
+                const el = document.getElementById('n-' + n.id);
+                if (el) { el.style.left = n.x + 'px'; el.style.top = n.y + 'px'; }
+                renderLinks();
+            }
+            break;
+        }
+        case 'addLink': {
+            if (!S.links.find(l => l.id === data.id)) {
+                S.links.push(data);
+                const f = S.nodes.find(n => n.id === data.from);
+                const t = S.nodes.find(n => n.id === data.to);
+                if (f) mountNode(f);
+                if (t) mountNode(t);
+                renderLinks();
+            }
+            break;
+        }
+        case 'deleteLink': {
+            S.links = S.links.filter(l => l.id !== data.id);
+            renderLinks();
+            S.nodes.forEach(n => mountNode(n));
+            break;
+        }
+        case 'updateLink': {
+            const lk = S.links.find(l => l.id === data.id);
+            if (lk) {
+                Object.assign(lk, data);
+                renderLinks();
+            }
+            break;
+        }
+        case 'setWorldName': {
+            $('worldName').value = data;
+            break;
+        }
+        case 'clearAll': {
+            S.nodes = []; S.links = [];
+            S.selNode = null; S.selLink = null; S.kbIdx = -1;
+            $('world').querySelectorAll('.node').forEach(n => n.remove());
+            renderLinks(); refreshList(); updateEmpty();
+            break;
+        }
+        default:
+            console.warn('unknown action', action, data);
+    }
+}
+
 function handlePeerData(data, conn) {
     if (data.type === 'full_state' || data.type === 'state_update') {
         const d = data.data;
-        if (d.worldName !== undefined) $('worldName').value = d.worldName;
-        S.nodes = d.nodes || [];
-        S.links = d.links || [];
-        $('world').querySelectorAll('.node').forEach(n => n.remove());
-        S.nodes.forEach(n => mountNode(n));
-        renderLinks(); refreshList(); updateEmpty();
+        if (S.collab.isHost) {
+            // only swap the entire state on full_state; state_update is rarely used now
+            if (data.type === 'full_state') applyState(d);
+            // forward to other peers
+            S.collab.connections.forEach(c => {
+                if (c !== conn && c.open) c.send(data);
+            });
+        } else {
+            applyState(d);
+        }
+    } else if (data.type === 'action') {
+        // apply remote action then forward if we're the host
+        applyAction(data.action, data.data);
+        if (S.collab.isHost) {
+            S.collab.connections.forEach(c => { if (c !== conn && c.open) c.send(data); });
+        }
     } else if (data.type === 'cursor') {
         updateCollaboratorCursor(data.id, data.color, data.x, data.y);
     }
 }
 
+// send a small action payload to connected peers
+function broadcastAction(action, data) {
+    const payload = { type: 'action', action, data };
+    S.collab.connections.forEach(conn => { if (conn.open) conn.send(payload); });
+}
+
+// (legacy) send full world state; used only for initial sync when a peer joins
 function broadcastStateToPeers() {
     const payload = {
         type: 'state_update',
@@ -821,13 +996,15 @@ function updateCollaboratorsList() {
 }
 
 function updateCollaboratorCursor(id, color, x, y) {
+    // x/y are now world coordinates; cursors are placed inside the world container
     let cursor = document.getElementById(`cursor-${id}`);
     if (!cursor) {
         cursor = document.createElement('div');
         cursor.id = `cursor-${id}`;
         cursor.className = 'collab-cursor';
         cursor.innerHTML = `<div class="collab-cursor-name" style="color: ${color};">User ${id.substring(0, 4)}</div>`;
-        document.getElementById('canvas').appendChild(cursor);
+        // append to world so the transform (pan/zoom) affects it
+        document.getElementById('world').appendChild(cursor);
     }
     cursor.style.left = x + 'px';
     cursor.style.top = y + 'px';
@@ -874,8 +1051,9 @@ $('copyUrlBtn').addEventListener('click', () => {
 // cursor broadcasting
 document.addEventListener('mousemove', e => {
     if (S.collab && S.collab.connections.size) {
-        const r = canv.getBoundingClientRect();
-        broadcastCursorToPeers(e.clientX - r.left, e.clientY - r.top);
+        // send world coordinates so that cursors land in the same place
+        const wp = s2w(e.clientX, e.clientY);
+        broadcastCursorToPeers(wp.x, wp.y);
     }
 });
 
