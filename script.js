@@ -96,16 +96,81 @@ function mountNode(n, isNew) {
         el.addEventListener('contextmenu', e => nodeCtx(e, n.id));
         el.addEventListener('keydown', e => nodeKey(e, n.id));
     }
+
     const c = nc(n);
     el.style.left = n.x + 'px'; el.style.top = n.y + 'px';
     el.style.setProperty('--c', c);
     el.setAttribute('aria-label', `${n.name}, ${n.type}`);
-    const cc = S.links.filter(l => l.from === n.id || l.to === n.id).length;
-    const ctHtml = (S.opts.cc && cc > 0) ? `<div class="nct">${cc} link${cc !== 1 ? 's' : ''}</div>` : '';
+
+    // get connected links and count
+    const connectedLinks = S.links.filter(l => l.from === n.id || l.to === n.id);
+    const cc = connectedLinks.length;
+
+    // only show the numeric link count if there are more than one link
+    const ctHtml = (S.opts.cc && cc > 1) ? `<div class="nct">${cc} links</div>` : '';
+
+    // tags (unchanged)
     const tHtml = (S.opts.tags && n.tags.length) ? `<div class="nchips">${n.tags.slice(0, 3).map(t => `<span class="nchip">${t}</span>`).join('')}</div>` : '';
-    el.innerHTML = `<div class="nstripe"></div><div class="nrow"><span class="nbadge">${n.type}</span><span class="nicon" aria-hidden="true">${gt(n.type).icon}</span></div><div class="ntitle">${n.name}</div>${ctHtml}${tHtml}`;
+
+    // include a container for linked-node "liens"
+    el.innerHTML = `<div class="nstripe"></div>
+                    <div class="nrow"><span class="nbadge">${n.type}</span><span class="nicon" aria-hidden="true">${gt(n.type).icon}</span></div>
+                    <div class="ntitle">${n.name}</div>
+                    ${ctHtml}
+                    ${tHtml}
+                    <div class="nlinks"></div>`;
+
     el.classList.toggle('selected', S.selNode === n.id);
     el.classList.toggle('csrc', S.connFrom === n.id);
+
+    // populate the linked-node buttons (liens)
+    const linksContainer = el.querySelector('.nlinks');
+    if (linksContainer) {
+        // compute the other node ids for each connection (dedupe)
+        const otherIds = Array.from(new Set(connectedLinks.map(l => (l.from === n.id ? l.to : l.from))));
+        const otherNodes = otherIds.map(id => S.nodes.find(nd => nd.id === id)).filter(Boolean);
+
+        // clear/prepare
+        linksContainer.innerHTML = '';
+        if (otherNodes.length) {
+            const list = document.createElement('div');
+            list.className = 'nlinks-list';
+
+            // show up to 3 linked nodes
+            otherNodes.slice(0, 3).forEach(o => {
+                const btn = document.createElement('button');
+                btn.type = 'button';
+                btn.className = 'nlink';
+                btn.textContent = o.name;
+                btn.setAttribute('aria-label', `Go to ${o.name}`);
+                // click: select + center camera
+                btn.addEventListener('click', ev => {
+                    ev.stopPropagation();
+                    selNode(o.id);
+                    const r = canv.getBoundingClientRect();
+                    S.cam.x = r.width / 2 - o.x * S.cam.z;
+                    S.cam.y = r.height / 2 - o.y * S.cam.z;
+                    applyCamera();
+                    say(`Navigated to ${o.name}`);
+                });
+                // double-click: open modal
+                btn.addEventListener('dblclick', ev => { ev.stopPropagation(); openModal(o); });
+
+                list.appendChild(btn);
+            });
+
+            // if there are more than 3, show a small "+N"
+            if (otherNodes.length > 3) {
+                const more = document.createElement('span');
+                more.className = 'nlinks-more';
+                more.textContent = `+${otherNodes.length - 3}`;
+                more.setAttribute('title', `${otherNodes.length} linked nodes`);
+                list.appendChild(more);
+            }
+
+            linksContainer.appendChild(list);
+        }
+    }
 }
 
 function delNode(id) {
@@ -749,7 +814,7 @@ function updateCollaboratorsList() {
     list.innerHTML = '';
     S.collab.collaborators.forEach((c, id) => {
         const item = document.createElement('div');
-        item.textContent = `User ${id.substring(0,4)}`;
+        item.textContent = `User ${id.substring(0, 4)}`;
         item.style.color = c.color;
         list.appendChild(item);
     });
@@ -761,7 +826,7 @@ function updateCollaboratorCursor(id, color, x, y) {
         cursor = document.createElement('div');
         cursor.id = `cursor-${id}`;
         cursor.className = 'collab-cursor';
-        cursor.innerHTML = `<div class="collab-cursor-name" style="color: ${color};">User ${id.substring(0,4)}</div>`;
+        cursor.innerHTML = `<div class="collab-cursor-name" style="color: ${color};">User ${id.substring(0, 4)}</div>`;
         document.getElementById('canvas').appendChild(cursor);
     }
     cursor.style.left = x + 'px';
@@ -776,7 +841,7 @@ function updateCollaboratorCursor(id, color, x, y) {
 
 setInterval(() => {
     const now = Date.now();
-    S.collab.collaborators.forEach((c,id) => {
+    S.collab.collaborators.forEach((c, id) => {
         if (now - c.lastSeen > 5000) {
             S.collab.collaborators.delete(id);
             const cur = document.getElementById(`cursor-${id}`);
