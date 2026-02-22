@@ -96,6 +96,38 @@
       <textarea class="ftextarea" id="fDesc" placeholder="Describe this node…" rows="3"></textarea>
     </div>
     <div class="fl">
+      <span class="flabel">Media</span>
+      <div class="media-grid">
+        <div class="media-col">
+          <div class="media-label">🖼 Image</div>
+          <div class="media-thumb" id="fImageThumb"><span class="media-empty">No image</span></div>
+          <div class="media-row-btns">
+            <button class="btn btn-ghost media-upload-btn" id="fImageBtn" type="button">Upload</button>
+            <button class="btn btn-ghost btn-danger media-clear-btn" id="fImageClear" type="button" style="display:none">✕</button>
+          </div>
+          <input type="file" id="fImageInput" accept="image/*" style="display:none">
+        </div>
+        <div class="media-col">
+          <div class="media-label">🎵 Audio</div>
+          <div class="media-thumb" id="fAudioThumb"><span class="media-empty">No audio</span></div>
+          <div class="media-row-btns">
+            <button class="btn btn-ghost media-upload-btn" id="fAudioBtn" type="button">Upload</button>
+            <button class="btn btn-ghost btn-danger media-clear-btn" id="fAudioClear" type="button" style="display:none">✕</button>
+          </div>
+          <input type="file" id="fAudioInput" accept="audio/*" style="display:none">
+        </div>
+        <div class="media-col">
+          <div class="media-label">🎬 Video</div>
+          <div class="media-thumb" id="fVideoThumb"><span class="media-empty">No video</span></div>
+          <div class="media-row-btns">
+            <button class="btn btn-ghost media-upload-btn" id="fVideoBtn" type="button">Upload</button>
+            <button class="btn btn-ghost btn-danger media-clear-btn" id="fVideoClear" type="button" style="display:none">✕</button>
+          </div>
+          <input type="file" id="fVideoInput" accept="video/*" style="display:none">
+        </div>
+      </div>
+    </div>
+    <div class="fl">
       <span class="flabel" id="tagsLbl">Tags</span>
       <div class="tags-box" id="fTagsBox" role="group" aria-labelledby="tagsLbl" aria-describedby="tagsHint"></div>
       <p class="fhint" id="tagsHint">Type and press Enter to add a tag</p>

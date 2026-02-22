@@ -23,10 +23,38 @@ const S = {
     cam: { x: 0, y: 0, z: 1 }, panning: false, panStart: {},
     dragging: null, tempMouse: null, search: '',
     editNode: null, editTags: [], editColor: PALETTE[0],
+    editImage: null, editAudio: null, editVideo: null,
     ctxNRef: null, ctxLRef: null,
     kbIdx: -1,
     opts: { theme: 'light', scale: 'normal', grid: true, motion: false, focus: false, cc: true, tags: true }
 };
+
+/* ── GLOBAL AUDIO (only one plays at a time) ── */
+let _audio = null;
+let _audioNodeId = null;
+function stopAudio() {
+    if (_audio) { _audio.pause(); _audio.currentTime = 0; _audio = null; }
+    if (_audioNodeId) {
+        const btn = document.querySelector(`#n-${_audioNodeId} .naudio-btn`);
+        if (btn) btn.textContent = '▶';
+        _audioNodeId = null;
+    }
+}
+function toggleNodeAudio(n) {
+    if (_audioNodeId === n.id) { stopAudio(); return; }
+    stopAudio();
+    if (!n.audio) return;
+    _audio = new Audio(n.audio);
+    _audioNodeId = n.id;
+    const btn = document.querySelector(`#n-${n.id} .naudio-btn`);
+    if (btn) btn.textContent = '■';
+    _audio.play().catch(() => {});
+    _audio.addEventListener('ended', () => {
+        if (_audioNodeId === n.id) { _audioNodeId = null; _audio = null; }
+        const b = document.querySelector(`#n-${n.id} .naudio-btn`);
+        if (b) b.textContent = '▶';
+    });
+}
 
 // collaboration metadata
 S.collab = {
@@ -70,7 +98,7 @@ function applyCamera() {
 /* ── NODES ── */
 function createNode(typeId, x, y, skipModal) {
     const t = gt(typeId);
-    const n = { id: uid(), type: typeId, name: `New ${t.name}`, desc: '', color: t.color, x, y, tags: [] };
+    const n = { id: uid(), type: typeId, name: `New ${t.name}`, desc: '', color: t.color, x, y, tags: [], image: null, audio: null, video: null };
     S.nodes.push(n);
     mountNode(n, true);
     refreshList();
@@ -100,32 +128,49 @@ function mountNode(n, isNew) {
     const c = nc(n);
     el.style.left = n.x + 'px'; el.style.top = n.y + 'px';
     el.style.setProperty('--c', c);
-    // include description in title and aria-label so users can see it
-    if (n.desc) {
-        el.setAttribute('aria-label', `${n.name}, ${n.type}, ${n.desc}`);
-        el.title = n.desc;
-    } else {
-        el.setAttribute('aria-label', `${n.name}, ${n.type}`);
-        el.removeAttribute('title');
-    }
+    el.setAttribute('aria-label', `${n.name}, ${n.type}${n.desc ? ', ' + n.desc : ''}`);
 
-    // connection count for display
     const cc = S.links.filter(l => l.from === n.id || l.to === n.id).length;
     const ctHtml = (S.opts.cc && cc > 0) ? `<div class="nct">${cc} ${cc === 1 ? 'link' : 'links'}</div>` : '';
-
-    // tags
     const tHtml = (S.opts.tags && n.tags.length) ? `<div class="nchips">${n.tags.slice(0, 3).map(t => `<span class="nchip">${t}</span>`).join('')}</div>` : '';
 
-    const descHtml = n.desc ? `<div class="ndesc" title="${n.desc}">${n.desc}</div>` : '';
+    const imgHtml  = n.image ? `<div class="nmedia-img"><img src="${n.image}" alt="node image"></div>` : '';
+    const vidHtml  = n.video ? `<div class="nmedia-vid"><video src="${n.video}" playsinline preload="metadata"></video></div>` : '';
+    const audHtml  = n.audio ? `<button class="naudio-btn" title="Play / stop audio" aria-label="Play audio">▶</button>` : '';
+    const descHtml = n.desc  ? `<div class="ndesc-below">${n.desc.replace(/</g,'&lt;').replace(/>/g,'&gt;')}</div>` : '';
+
     el.innerHTML = `<div class="nstripe"></div>
+                    ${audHtml}
                     <div class="nrow"><span class="nbadge">${n.type}</span><span class="nicon" aria-hidden="true">${gt(n.type).icon}</span></div>
                     <div class="ntitle">${n.name}</div>
-                    ${descHtml}
+                    ${imgHtml}
+                    ${vidHtml}
                     ${ctHtml}
-                    ${tHtml}`;
+                    ${tHtml}
+                    ${descHtml}`;
 
     el.classList.toggle('selected', S.selNode === n.id);
     el.classList.toggle('csrc', S.connFrom === n.id);
+
+    // Audio button interaction
+    const audioBtn = el.querySelector('.naudio-btn');
+    if (audioBtn) {
+        if (_audioNodeId === n.id) audioBtn.textContent = '■';
+        audioBtn.addEventListener('click', ev => { ev.stopPropagation(); toggleNodeAudio(n); });
+        audioBtn.addEventListener('mousedown', ev => ev.stopPropagation());
+    }
+    // Video: prevent node drag/select on video interaction
+    const vid = el.querySelector('video');
+    if (vid) {
+        vid.addEventListener('click', ev => ev.stopPropagation());
+        vid.addEventListener('mousedown', ev => ev.stopPropagation());
+        vid.addEventListener('dblclick', ev => ev.stopPropagation());
+        // show controls on hover via CSS
+        vid.addEventListener('mouseenter', () => vid.setAttribute('controls', ''));
+        vid.addEventListener('mouseleave', () => { if (!vid.dataset.playing) vid.removeAttribute('controls'); });
+        vid.addEventListener('play', () => { vid.dataset.playing = '1'; vid.setAttribute('controls', ''); });
+        vid.addEventListener('pause', () => { delete vid.dataset.playing; });
+    }
 }
 
 function delNode(id, skipBroadcast) {
@@ -516,11 +561,12 @@ let mRF = null;
 function openModal(node) {
     if (!node) return;
     S.editNode = node; S.editTags = [...node.tags]; S.editColor = node.color || gt(node.type).color;
+    S.editImage = node.image || null; S.editAudio = node.audio || null; S.editVideo = node.video || null;
     mRF = document.activeElement;
     $('mTitle').textContent = node.name.startsWith('New ') ? 'Create Node' : 'Edit Node';
     $('fName').value = node.name; $('fType').value = node.type; $('fDesc').value = node.desc || '';
     $('fBtnDel').style.display = node.name.startsWith('New ') ? 'none' : 'flex';
-    renderTagChips(); renderSwatches();
+    renderTagChips(); renderSwatches(); renderMediaPreviews();
     $('nodeModal').classList.add('on');
     setTimeout(() => $('fName').select(), 55);
     $('nodeModal').addEventListener('keydown', trapModal);
@@ -546,7 +592,9 @@ $('fBtnSave').addEventListener('click', () => {
     const v = $('fName').value.trim();
     if (!v) { $('fName').focus(); $('fName').setAttribute('aria-invalid', 'true'); return; }
     $('fName').removeAttribute('aria-invalid');
-    n.name = v; n.type = $('fType').value; n.desc = $('fDesc').value; n.tags = [...S.editTags]; n.color = S.editColor;
+    n.name = v; n.type = $('fType').value; n.desc = $('fDesc').value;
+    n.tags = [...S.editTags]; n.color = S.editColor;
+    n.image = S.editImage; n.audio = S.editAudio; n.video = S.editVideo;
     mountNode(n); refreshList(); renderLinks();
     broadcastAction('updateNode', n);
     closeModal(); autoSave(); say(`Saved ${n.name}.`);
@@ -596,6 +644,52 @@ function renderSwatches() {
         box.appendChild(s);
     });
 }
+
+/* ── MEDIA UPLOADS ── */
+function fileToDataURL(file) {
+    return new Promise(resolve => {
+        const r = new FileReader(); r.onload = e => resolve(e.target.result); r.readAsDataURL(file);
+    });
+}
+function renderMediaPreviews() {
+    const iThumb = $('fImageThumb'), iClear = $('fImageClear');
+    if (S.editImage) {
+        iThumb.innerHTML = `<img src="${S.editImage}" alt="preview">`;
+        iClear.style.display = '';
+    } else { iThumb.innerHTML = '<span class="media-empty">No image</span>'; iClear.style.display = 'none'; }
+
+    const aThumb = $('fAudioThumb'), aClear = $('fAudioClear');
+    if (S.editAudio) {
+        aThumb.innerHTML = `<audio controls src="${S.editAudio}" style="width:100%;margin-top:2px"></audio>`;
+        aClear.style.display = '';
+    } else { aThumb.innerHTML = '<span class="media-empty">No audio</span>'; aClear.style.display = 'none'; }
+
+    const vThumb = $('fVideoThumb'), vClear = $('fVideoClear');
+    if (S.editVideo) {
+        vThumb.innerHTML = `<video controls src="${S.editVideo}" style="width:100%;max-height:80px"></video>`;
+        vClear.style.display = '';
+    } else { vThumb.innerHTML = '<span class="media-empty">No video</span>'; vClear.style.display = 'none'; }
+}
+$('fImageBtn').addEventListener('click', () => $('fImageInput').click());
+$('fImageInput').addEventListener('change', async e => {
+    const f = e.target.files[0]; if (!f) return;
+    S.editImage = await fileToDataURL(f); renderMediaPreviews(); e.target.value = '';
+});
+$('fImageClear').addEventListener('click', () => { S.editImage = null; renderMediaPreviews(); });
+
+$('fAudioBtn').addEventListener('click', () => $('fAudioInput').click());
+$('fAudioInput').addEventListener('change', async e => {
+    const f = e.target.files[0]; if (!f) return;
+    S.editAudio = await fileToDataURL(f); renderMediaPreviews(); e.target.value = '';
+});
+$('fAudioClear').addEventListener('click', () => { S.editAudio = null; renderMediaPreviews(); });
+
+$('fVideoBtn').addEventListener('click', () => $('fVideoInput').click());
+$('fVideoInput').addEventListener('change', async e => {
+    const f = e.target.files[0]; if (!f) return;
+    S.editVideo = await fileToDataURL(f); renderMediaPreviews(); e.target.value = '';
+});
+$('fVideoClear').addEventListener('click', () => { S.editVideo = null; renderMediaPreviews(); });
 
 /* ── OPTIONS ── */
 let oRF = null;

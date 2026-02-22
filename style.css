@@ -751,15 +751,6 @@ textarea:focus-visible,
     word-break: break-word
 }
 
-.ndesc {
-    font-size: 11px;
-    color: var(--text-mid);
-    margin-top: 2px;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-}
-
 .nct {
     font-size: 11px;
     font-weight: 600;
@@ -1309,7 +1300,137 @@ kbd {
     margin: .2rem 0
 }
 
-/* live region */
+/* ══════════════ NODE MEDIA ══════════════ */
+.node {
+    overflow: visible;
+}
+
+.naudio-btn {
+    position: absolute;
+    top: 7px;
+    right: 7px;
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--c, var(--accent));
+    cursor: pointer;
+    font-size: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 3;
+    transition: background .12s, color .12s, border-color .12s;
+    pointer-events: all;
+    line-height: 1;
+}
+.naudio-btn:hover {
+    background: var(--c, var(--accent));
+    color: #fff;
+    border-color: var(--c, var(--accent));
+}
+
+.nmedia-img {
+    margin: 5px -11px;
+    overflow: hidden;
+    max-height: 94px;
+    border-top: 1px solid var(--border);
+    border-bottom: 1px solid var(--border);
+}
+.nmedia-img img {
+    width: 100%;
+    height: 94px;
+    object-fit: cover;
+    display: block;
+}
+
+.nmedia-vid {
+    margin: 5px -11px;
+    border-top: 1px solid var(--border);
+    border-bottom: 1px solid var(--border);
+    background: #000;
+    max-height: 94px;
+    overflow: hidden;
+}
+.nmedia-vid video {
+    width: 100%;
+    max-height: 94px;
+    display: block;
+    object-fit: cover;
+    cursor: default;
+}
+
+.ndesc-below {
+    position: absolute;
+    top: calc(100% + 6px);
+    left: 50%;
+    transform: translateX(-50%);
+    width: 170px;
+    text-align: center;
+    font-size: 11px;
+    line-height: 1.45;
+    color: var(--text-mid);
+    pointer-events: none;
+    white-space: normal;
+    word-break: break-word;
+}
+
+/* ══════════════ MODAL MEDIA ══════════════ */
+.media-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: .55rem;
+}
+.media-col {
+    display: flex;
+    flex-direction: column;
+    gap: .28rem;
+}
+.media-label {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-mid);
+}
+.media-thumb {
+    min-height: 58px;
+    background: var(--raised);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex: 1;
+}
+.media-thumb img,
+.media-thumb video {
+    width: 100%;
+    max-height: 80px;
+    object-fit: cover;
+    display: block;
+}
+.media-empty {
+    font-size: 10px;
+    color: var(--text-muted);
+    padding: 4px;
+    text-align: center;
+}
+.media-row-btns {
+    display: flex;
+    gap: .22rem;
+}
+.media-upload-btn {
+    flex: 1;
+    font-size: 11px;
+    padding: .25rem .35rem;
+    min-height: 26px;
+}
+.media-clear-btn {
+    font-size: 11px;
+    padding: .25rem .4rem;
+    min-height: 26px;
+}
 #sr-status {
     position: absolute;
     width: 1px;
