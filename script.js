@@ -1,4 +1,3 @@
-
 'use strict';
 /* ── TYPES & PALETTE ── */
 const TYPES = [
@@ -110,77 +109,23 @@ function mountNode(n, isNew) {
         el.removeAttribute('title');
     }
 
-    // get connected links and count
-    const connectedLinks = S.links.filter(l => l.from === n.id || l.to === n.id);
-    const cc = connectedLinks.length;
+    // connection count for display
+    const cc = S.links.filter(l => l.from === n.id || l.to === n.id).length;
+    const ctHtml = (S.opts.cc && cc > 0) ? `<div class="nct">${cc} ${cc === 1 ? 'link' : 'links'}</div>` : '';
 
-    // only show the numeric link count if there are more than one link
-    const ctHtml = (S.opts.cc && cc > 1) ? `<div class="nct">${cc} links</div>` : '';
-
-    // tags (unchanged)
+    // tags
     const tHtml = (S.opts.tags && n.tags.length) ? `<div class="nchips">${n.tags.slice(0, 3).map(t => `<span class="nchip">${t}</span>`).join('')}</div>` : '';
 
-    // include a container for linked-node "liens"
     const descHtml = n.desc ? `<div class="ndesc" title="${n.desc}">${n.desc}</div>` : '';
     el.innerHTML = `<div class="nstripe"></div>
                     <div class="nrow"><span class="nbadge">${n.type}</span><span class="nicon" aria-hidden="true">${gt(n.type).icon}</span></div>
                     <div class="ntitle">${n.name}</div>
                     ${descHtml}
                     ${ctHtml}
-                    ${tHtml}
-                    <div class="nlinks"></div>`;
+                    ${tHtml}`;
 
     el.classList.toggle('selected', S.selNode === n.id);
     el.classList.toggle('csrc', S.connFrom === n.id);
-
-    // populate the linked-node buttons (liens)
-    const linksContainer = el.querySelector('.nlinks');
-    if (linksContainer) {
-        // compute the other node ids for each connection (dedupe)
-        const otherIds = Array.from(new Set(connectedLinks.map(l => (l.from === n.id ? l.to : l.from))));
-        const otherNodes = otherIds.map(id => S.nodes.find(nd => nd.id === id)).filter(Boolean);
-
-        // clear/prepare
-        linksContainer.innerHTML = '';
-        if (otherNodes.length) {
-            const list = document.createElement('div');
-            list.className = 'nlinks-list';
-
-            // show up to 3 linked nodes
-            otherNodes.slice(0, 3).forEach(o => {
-                const btn = document.createElement('button');
-                btn.type = 'button';
-                btn.className = 'nlink';
-                btn.textContent = o.name;
-                btn.setAttribute('aria-label', `Go to ${o.name}`);
-                // click: select + center camera
-                btn.addEventListener('click', ev => {
-                    ev.stopPropagation();
-                    selNode(o.id);
-                    const r = canv.getBoundingClientRect();
-                    S.cam.x = r.width / 2 - o.x * S.cam.z;
-                    S.cam.y = r.height / 2 - o.y * S.cam.z;
-                    applyCamera();
-                    say(`Navigated to ${o.name}`);
-                });
-                // double-click: open modal
-                btn.addEventListener('dblclick', ev => { ev.stopPropagation(); openModal(o); });
-
-                list.appendChild(btn);
-            });
-
-            // if there are more than 3, show a small "+N"
-            if (otherNodes.length > 3) {
-                const more = document.createElement('span');
-                more.className = 'nlinks-more';
-                more.textContent = `+${otherNodes.length - 3}`;
-                more.setAttribute('title', `${otherNodes.length} linked nodes`);
-                list.appendChild(more);
-            }
-
-            linksContainer.appendChild(list);
-        }
-    }
 }
 
 function delNode(id, skipBroadcast) {
@@ -213,8 +158,8 @@ function nodeKey(e, id) {
 
 /* ── LINKS ── */
 function createLink(from, to) {
-    if (S.links.find(l => (l.from === from && l.to === to) || (l.from === to && l.to === from))) {
-        say('Nodes are already connected.');
+    if (S.links.find(l => l.from === from && l.to === to)) {
+        say('These nodes are already connected in that direction.');
         return;
     }
     const lk = { id: uid(), from, to, label: '' };
@@ -224,65 +169,113 @@ function createLink(from, to) {
     broadcastAction('addLink', lk);
     autoSave();
     const fn = S.nodes.find(n => n.id === from), tn = S.nodes.find(n => n.id === to);
-    say(`Connected ${fn?.name || 'node'} to ${tn?.name || 'node'}.`);
+    say(`Connected ${fn?.name || 'node'} → ${tn?.name || 'node'}.`);
 }
 
 function renderLinks() {
     const svg = $('svgLayer');
-    const defs = svg.querySelector('defs');
+    const NS = 'http://www.w3.org/2000/svg';
+
+    // Clear everything — no markers, we draw arrowheads as plain polygons
     svg.innerHTML = '';
-    if (defs) svg.appendChild(defs);
+
+    function svgEl(tag, attrs) {
+        const el = document.createElementNS(NS, tag);
+        for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, v);
+        return el;
+    }
+
+    // Draw arrowhead as a filled polygon at tip (tx,ty) pointing in direction (dx,dy)
+    function drawArrow(tx, ty, dx, dy, color, opacity) {
+        const len = Math.hypot(dx, dy);
+        if (len < 0.001) return;
+        const ux = dx / len, uy = dy / len;
+        const px = -uy, py = ux; // perpendicular
+        const aw = 5, ah = 10;  // arrowhead half-width and height
+        const bx = tx - ux * ah, by = ty - uy * ah;
+        const pts = [
+            `${tx},${ty}`,
+            `${bx + px * aw},${by + py * aw}`,
+            `${bx - px * aw},${by - py * aw}`
+        ].join(' ');
+        svg.appendChild(svgEl('polygon', { points: pts, fill: color, opacity }));
+    }
+
+    // Temp dashed preview line while connecting
     if (S.connFrom && S.tempMouse) {
         const fn = S.nodes.find(n => n.id === S.connFrom);
-        if (fn) svg.appendChild(mkL(fn.x, fn.y, S.tempMouse.x, S.tempMouse.y, 'var(--accent)', 1.5, true, null, .4));
-    }
-    for (const lk of S.links) {
-        const fn = S.nodes.find(n => n.id === lk.from), tn = S.nodes.find(n => n.id === lk.to);
-        if (!fn || !tn) continue;
-        const dx = tn.x - fn.x, dy = tn.y - fn.y, d = Math.hypot(dx, dy); if (d < 2) continue;
-        const nx = dx / d, ny = dy / d, r = 68;
-        const x1 = fn.x + nx * r, y1 = fn.y + ny * r, x2 = tn.x - nx * (r + 9), y2 = tn.y - ny * (r + 9);
-        const isSel = S.selLink === lk.id;
-        const hit = mkL(x1, y1, x2, y2, 'transparent', 15);
-        hit.setAttribute('pointer-events', 'stroke'); hit.style.cursor = 'pointer';
-        hit.addEventListener('mousedown', e => e.stopPropagation());
-        hit.addEventListener('click', e => { e.stopPropagation(); S.selLink = lk.id; S.selNode = null; renderLinks(); refreshList(); });
-        hit.addEventListener('contextmenu', e => { e.preventDefault(); e.stopPropagation(); S.ctxLRef = lk; showMenu($('ctxL'), e.clientX, e.clientY); });
-        $('svgLayer').appendChild(hit);
-        $('svgLayer').appendChild(mkL(x1, y1, x2, y2, 'var(--accent)', 1.5, false, isSel ? 'url(#arrs)' : 'url(#arr)', isSel ? 1 : .5));
-        if (lk.label) {
-            const mx = (fn.x + tn.x) / 2, my = (fn.y + tn.y) / 2;
-            const lines = lk.label.split('\n');
-            const lineHeight = 12;
-            const pad = 8;
-            const height = lines.length * lineHeight + 2;
-            const bg = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
-            bg.setAttribute('x', mx - 28); bg.setAttribute('y', my - height/2); bg.setAttribute('width', 56); bg.setAttribute('height', height);
-            bg.setAttribute('rx', 3); bg.setAttribute('fill', 'var(--surface)'); $('svgLayer').appendChild(bg);
-            const txt = document.createElementNS('http://www.w3.org/2000/svg', 'text');
-            txt.setAttribute('x', mx); txt.setAttribute('y', my - (lines.length-1) * (lineHeight/2));
-            txt.setAttribute('text-anchor', 'middle');
-            txt.setAttribute('fill', 'var(--text-mid)');
-            txt.setAttribute('font-size', '10'); txt.setAttribute('font-family', 'Nunito Sans,sans-serif');
-            lines.forEach((ln, idx) => {
-                const tspan = document.createElementNS('http://www.w3.org/2000/svg', 'tspan');
-                tspan.setAttribute('x', mx);
-                tspan.setAttribute('dy', idx === 0 ? 0 : lineHeight);
-                tspan.textContent = ln;
-                txt.appendChild(tspan);
+        if (fn) {
+            const color = nc(fn);
+            const line = svgEl('line', {
+                x1: fn.x, y1: fn.y,
+                x2: S.tempMouse.x, y2: S.tempMouse.y,
+                stroke: color, 'stroke-width': 1.5,
+                'stroke-dasharray': '6,4', opacity: 0.5
             });
-            $('svgLayer').appendChild(txt);
+            svg.appendChild(line);
+            const tdx = S.tempMouse.x - fn.x, tdy = S.tempMouse.y - fn.y;
+            drawArrow(S.tempMouse.x, S.tempMouse.y, tdx, tdy, color, 0.5);
         }
     }
-}
 
-function mkL(x1, y1, x2, y2, stroke, w, dash, me, opa = 1) {
-    const l = document.createElementNS('http://www.w3.org/2000/svg', 'line');
-    l.setAttribute('x1', x1); l.setAttribute('y1', y1); l.setAttribute('x2', x2); l.setAttribute('y2', y2);
-    l.setAttribute('stroke', stroke); l.setAttribute('stroke-width', w); l.setAttribute('opacity', opa);
-    if (dash) l.setAttribute('stroke-dasharray', '6,4');
-    if (me) l.setAttribute('marker-end', me);
-    return l;
+    for (const lk of S.links) {
+        const fn = S.nodes.find(n => n.id === lk.from);
+        const tn = S.nodes.find(n => n.id === lk.to);
+        if (!fn || !tn) continue;
+
+        const dx = tn.x - fn.x, dy = tn.y - fn.y;
+        const dist = Math.hypot(dx, dy);
+        if (dist < 2) continue;
+
+        const ux = dx / dist, uy = dy / dist;
+        const r = 68; // approx half node card width
+        const ah = 12; // arrowhead height — stop the line this far from tip
+        const x1 = fn.x + ux * r, y1 = fn.y + uy * r;
+        const x2 = tn.x - ux * (r + ah), y2 = tn.y - uy * (r + ah); // line ends before arrowhead
+
+        const isSel = S.selLink === lk.id;
+        const color = nc(fn);
+        const opacity = isSel ? 1 : 0.75;
+
+        // Curve offset: larger if a reverse link exists to separate the two arrows
+        const hasReverse = S.links.some(l => l.from === lk.to && l.to === lk.from);
+        const perp = hasReverse ? 50 : 20;
+        const cpx = (x1 + x2) / 2 - uy * perp;
+        const cpy = (y1 + y2) / 2 + ux * perp;
+
+        // The actual arrow tip sits at the node edge
+        const tipX = tn.x - ux * r, tipY = tn.y - uy * r;
+
+        const pathD = `M${x1},${y1} Q${cpx},${cpy} ${x2},${y2}`;
+
+        // Wide invisible hit zone (pointer-events on the SVG layer are set to none globally,
+        // so we override per-element)
+        const hit = svgEl('path', {
+            d: pathD, fill: 'none', stroke: 'rgba(0,0,0,0)',
+            'stroke-width': 18, 'pointer-events': 'stroke'
+        });
+        hit.style.cursor = 'pointer';
+        hit.addEventListener('mousedown', e => e.stopPropagation());
+        hit.addEventListener('click', e => {
+            e.stopPropagation();
+            S.selLink = lk.id; S.selNode = null;
+            renderLinks(); refreshList();
+        });
+        hit.addEventListener('contextmenu', e => {
+            e.preventDefault(); e.stopPropagation();
+            S.ctxLRef = lk; showMenu($('ctxL'), e.clientX, e.clientY);
+        });
+        svg.appendChild(hit);
+
+        // Visible curved line
+        svg.appendChild(svgEl('path', {
+            d: pathD, fill: 'none', stroke: color,
+            'stroke-width': isSel ? 2.5 : 1.8, opacity
+        }));
+
+        // Arrowhead: tangent direction at bezier end = (x2-cpx, y2-cpy)
+        drawArrow(tipX, tipY, tipX - cpx, tipY - cpy, color, opacity);
+    }
 }
 
 /* ── CONNECT ── */

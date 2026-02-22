@@ -593,6 +593,16 @@ textarea:focus-visible,
     pointer-events: none
 }
 
+#svgLayer path,
+#svgLayer line,
+#svgLayer polygon {
+    pointer-events: none
+}
+
+#svgLayer path[pointer-events="stroke"] {
+    pointer-events: stroke
+}
+
 .empty-st {
     position: absolute;
     inset: 0;
